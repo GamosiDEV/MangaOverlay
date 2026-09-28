@@ -36,6 +36,20 @@ No menu da bandeja, **Obra** escolhe o mangá que você está lendo (ou cria um 
 
 "Esquecer as traduções desta obra…" apaga as traduções salvas da obra atual (pede confirmação).
 
+A busca no banco é primeiro pelo texto exato e, se não achar, por semelhança (80% ou mais, em falas com 4 caracteres ou mais), porque o OCR às vezes lê um risco do desenho como um caractere a mais.
+
+## Importar capítulos
+
+"Importar capítulos…" no menu da bandeja lê capítulos inteiros de uma vez, para a obra atual:
+
+- **Pasta de imagens:** um capítulo.
+- **Pasta com subpastas, CBZs ou PDFs:** vários capítulos de uma vez, ordenados pelo número no nome ("Cap 2" antes de "Cap 10").
+- **Arquivos CBZ, ZIP ou PDF:** um capítulo cada.
+
+A detecção dos balões e o OCR rodam na sua GPU, sem custo de API; o texto de cada balão fica no banco para a tradução em lote (próximas fases). As imagens não são copiadas: o banco guarda só onde está cada página. Uma janela mostra o progresso, e o atalho de traduzir continua funcionando durante a importação (tem prioridade).
+
+Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continua das páginas que faltavam ("Retomar importação" no menu também faz isso). Capítulos já importados na mesma obra são ignorados se escolhidos de novo.
+
 ## Motores
 
 | Motor | Precisa de | Observação |

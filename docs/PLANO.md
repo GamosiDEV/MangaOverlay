@@ -40,12 +40,14 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 ### Fase 2: Importação de capítulos
 
-- [ ] Importar uma pasta de imagens, um arquivo CBZ ou um PDF, informando obra e capítulo (sugestão automática pelo nome do arquivo ou pasta).
-- [ ] Etapa local: detecção e OCR de todas as páginas na GPU, gravando tudo no banco.
-- [ ] Retomada: se o app fechar no meio, continua da última página processada.
-- [ ] Janela de progresso: páginas processadas e tempo estimado.
+- [x] Importar uma pasta de imagens, um arquivo CBZ ou um PDF, informando obra e capítulo (sugestão automática pelo nome do arquivo ou pasta). Uma pasta com subpastas/CBZs/PDFs importa vários capítulos de uma vez.
+- [x] Etapa local: detecção e OCR de todas as páginas na GPU, gravando tudo no banco (tabelas `capitulos`, `paginas`, `regioes`, migração 2).
+- [x] Retomada: se o app fechar no meio, continua da última página processada (automática ao abrir o app).
+- [x] Janela de progresso: páginas processadas e tempo estimado.
+- [x] O atalho de traduzir tem prioridade sobre a importação na GPU.
+- [x] Busca aproximada no banco (o OCR pode ler a mesma fala com um caractere de ruído diferente na tela e no arquivo).
 
-**Pronto quando:** importar 3 capítulos resulta no texto original de todas as páginas no banco, e a importação sobrevive a fechar o app no meio.
+**Pronto quando:** importar 3 capítulos resulta no texto original de todas as páginas no banco, e a importação sobrevive a fechar o app no meio. ✅ Verificado (processo morto com kill -9 no meio; a retomada terminou só as páginas pendentes, com resultado idêntico ao de uma importação sem interrupção).
 
 ### Fase 3: Lista de personagens
 

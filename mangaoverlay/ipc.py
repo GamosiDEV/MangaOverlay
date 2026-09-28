@@ -36,6 +36,10 @@ def send(command: str, name: str = DEFAULT_NAME) -> bool:
     return True
 
 
+class AlreadyRunning(Exception):
+    """Outra instância do app já está escutando."""
+
+
 class Server:
     """Escuta comandos de outras execuções do app numa thread em segundo plano."""
 
@@ -46,9 +50,14 @@ class Server:
         self._closed = False
 
     def start(self) -> None:
+        """Começa a escutar. Levanta AlreadyRunning se outra instância responder no mesmo endereço."""
         address, family = _address(self._name)
+        # Duas execuções abertas quase juntas passam ambas pela checagem inicial do __main__;
+        # sem este teste, a segunda apagaria o socket da primeira, que ficaria viva e surda.
+        if send("ping", self._name):
+            raise AlreadyRunning
         if family == "AF_UNIX" and os.path.exists(address):
-            # Socket órfão de uma execução que terminou sem limpar (send() já falhou).
+            # Ninguém respondeu: socket órfão de uma execução que terminou sem limpar.
             os.unlink(address)
         self._listener = Listener(address, family=family)
         threading.Thread(target=self._serve, name="ipc-server", daemon=True).start()

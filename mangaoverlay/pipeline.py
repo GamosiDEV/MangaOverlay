@@ -1,6 +1,9 @@
 """Do print da tela até os itens desenhados na sobreposição. Roda fora da thread da interface."""
 
+import threading
+import time
 from collections import deque
+from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -60,6 +63,14 @@ class ScreenResult:
     color_image: Image.Image | None  # a página colorida, do tamanho de color_box
 
 
+def _reading_order(box: Box, page_height: int, source: str) -> tuple:
+    """Ordem aproximada de leitura: faixas de cima para baixo; dentro da faixa, da direita para a
+    esquerda no mangá japonês e da esquerda para a direita nos demais."""
+    band = round(box[1] / max(1, page_height * 0.08))
+    center = (box[0] + box[2]) / 2
+    return band, -center if source == "ja" else center
+
+
 class _Cache:
     """Traduções já feitas, reconhecidas pela aparência do recorte (tolera pequenas diferenças de captura)."""
 
@@ -84,6 +95,10 @@ class Pipeline:
         # Sem banco (ex.: --image), as traduções ficam só na memória desta execução
         self._db = db
         self._work: int | None = None
+        # Uma coisa por vez na GPU; o atalho passa na frente da importação (ver _interactive/_background)
+        self._gpu = threading.Lock()
+        self._waiting_lock = threading.Lock()
+        self._waiting = 0
         self._device: str | None = None
         self._detector: Detector | None = None
         self._ocr: OcrEngine | None = None
@@ -95,6 +110,10 @@ class Pipeline:
 
     def clear_cache(self, work_id: int | None = None, forget_saved: bool = False) -> int:
         """Esvazia o cache em memória; com forget_saved, apaga também as traduções salvas da obra."""
+        with self._interactive():
+            return self._clear_cache(work_id, forget_saved)
+
+    def _clear_cache(self, work_id: int | None, forget_saved: bool) -> int:
         self._cache.clear()
         self._context.clear()
         if forget_saved and self._db is not None:
@@ -115,6 +134,10 @@ class Pipeline:
 
     def warm_up(self, config: Config) -> None:
         """Carrega os modelos locais antes do primeiro atalho (na primeira vez eles são baixados)."""
+        with self._interactive():
+            self._warm_up(config)
+
+    def _warm_up(self, config: Config) -> None:
         self._prepare(config, lambda _msg: None)
         if config.source_lang != AUTO:
             self._ocr.load(config.source_lang)  # também no modo visão: o texto lido é a chave do banco
@@ -130,6 +153,17 @@ class Pipeline:
         status: Callable[[str], None] = lambda _msg: None,
         translate: bool = True,
         colorize: bool = False,
+    ) -> ScreenResult:
+        with self._interactive():
+            return self._process(image, config, status, translate, colorize)
+
+    def _process(
+        self,
+        image: Image.Image,
+        config: Config,
+        status: Callable[[str], None],
+        translate: bool,
+        colorize: bool,
     ) -> ScreenResult:
         vision = config.engine in VISION_ENGINES
         if translate and config.source_lang == AUTO and not vision:
@@ -223,16 +257,8 @@ class Pipeline:
             # Sem idioma definido não há OCR local, logo nem chave para o banco: o LLM lê a imagem direto.
             return self._call_translator(image, regions, [(i, "") for i in indices], config)
 
-        if self._ocr is None:
-            raise PipelineError("OCR não carregado.")
         status("Lendo os textos…")
-        readings = self._ocr.read([crops[i] for i in indices], source)
-        # Descarta leituras incertas ou sem a escrita do idioma de origem (lixo, textos da interface do sistema)
-        readable = [
-            (i, text)
-            for i, (text, confidence) in zip(indices, readings)
-            if confidence >= 0.3 and looks_like(text, source) and not (source == "ja" and self._ocr.is_latin(crops[i]))
-        ]
+        readable = self._read(crops, indices, source)
         if not readable:
             return {}
 
@@ -258,6 +284,58 @@ class Pipeline:
                 self._db.save_translations(key, [(local_text[i], r.translation) for i, r in new.items()])
             self._context.extend(r.original for _i, r in sorted(new.items()) if r.original)
         return results
+
+    def _read(self, crops: list[Image.Image], indices: list[int], source: str) -> list[tuple[int, str]]:
+        """OCR das regiões `indices`, descartando leituras incertas ou sem a escrita do idioma de origem
+        (lixo, textos da interface do sistema). Retorna (índice, texto) na mesma ordem."""
+        if self._ocr is None:
+            raise PipelineError("OCR não carregado.")
+        readings = self._ocr.read([crops[i] for i in indices], source)
+        return [
+            (i, text)
+            for i, (text, confidence) in zip(indices, readings)
+            if confidence >= 0.3 and looks_like(text, source) and not (source == "ja" and self._ocr.is_latin(crops[i]))
+        ]
+
+    def read_page(self, image: Image.Image, config: Config) -> list[tuple[Box, str]]:
+        """Detecção + OCR de uma página importada: (caixa do texto, texto lido) na ordem de leitura.
+
+        Roda em segundo plano e cede a GPU a cada página se o usuário pedir uma tradução na tela.
+        """
+        with self._background():
+            self._prepare(config, lambda _msg: None)
+            regions = self._detector.detect(image, config.include_free_text).regions
+            crops = [image.crop(r.text_box) for r in regions]
+            readable = self._read(crops, list(range(len(regions))), config.source_lang)
+        boxes = [(regions[i].text_box, text) for i, text in readable]
+        return sorted(boxes, key=lambda item: _reading_order(item[0], image.height, config.source_lang))
+
+    @contextmanager
+    def _interactive(self):
+        """Uso da GPU pelo atalho (tem prioridade sobre a importação)."""
+        with self._waiting_lock:
+            self._waiting += 1
+        self._gpu.acquire()
+        with self._waiting_lock:
+            self._waiting -= 1
+        try:
+            yield
+        finally:
+            self._gpu.release()
+
+    @contextmanager
+    def _background(self):
+        """Uso da GPU pela importação: espera enquanto houver um pedido do atalho na fila."""
+        while True:
+            with self._waiting_lock:
+                idle = self._waiting == 0
+            if idle and self._gpu.acquire(timeout=0.05):
+                break
+            time.sleep(0.02)
+        try:
+            yield
+        finally:
+            self._gpu.release()
 
     def _call_translator(
         self,

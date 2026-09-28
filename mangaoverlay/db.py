@@ -10,6 +10,7 @@ O esquema é versionado (PRAGMA user_version): cada fase do plano acrescenta sua
 import sqlite3
 import threading
 import unicodedata
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,37 @@ _MIGRATIONS = [
         IFNULL(obra_id, 0), texto_original, idioma_origem, idioma_destino, motor, modelo
     );
     """,
+    # 2: capítulos importados, páginas (com estado, para retomar) e o texto lido de cada balão.
+    # As imagens não são copiadas: `origem` + `arquivo` apontam para o original.
+    """
+    CREATE TABLE capitulos (
+        id INTEGER PRIMARY KEY,
+        obra_id INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+        nome TEXT NOT NULL,
+        ordem REAL NOT NULL,
+        origem TEXT NOT NULL,
+        criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (obra_id, origem)
+    );
+    CREATE TABLE paginas (
+        id INTEGER PRIMARY KEY,
+        capitulo_id INTEGER NOT NULL REFERENCES capitulos(id) ON DELETE CASCADE,
+        numero INTEGER NOT NULL,
+        arquivo TEXT NOT NULL,
+        estado TEXT NOT NULL DEFAULT 'pendente' CHECK (estado IN ('pendente', 'lida', 'erro')),
+        erro TEXT,
+        UNIQUE (capitulo_id, numero)
+    );
+    CREATE INDEX paginas_estado ON paginas (estado);
+    CREATE TABLE regioes (
+        id INTEGER PRIMARY KEY,
+        pagina_id INTEGER NOT NULL REFERENCES paginas(id) ON DELETE CASCADE,
+        ordem INTEGER NOT NULL,
+        x0 INTEGER NOT NULL, y0 INTEGER NOT NULL, x1 INTEGER NOT NULL, y1 INTEGER NOT NULL,
+        texto_original TEXT NOT NULL
+    );
+    CREATE INDEX regioes_pagina ON regioes (pagina_id);
+    """,
 ]
 
 
@@ -55,6 +87,29 @@ class Work:
 
 
 @dataclass(frozen=True)
+class PendingPage:
+    """Página importada que ainda não passou pela detecção e OCR."""
+
+    id: int
+    work_id: int
+    source_lang: str
+    chapter: str
+    origin: str
+    number: int
+    file: str
+
+
+@dataclass(frozen=True)
+class ChapterSummary:
+    id: int
+    name: str
+    pages: int
+    read: int
+    errors: int
+    texts: int
+
+
+@dataclass(frozen=True)
 class TranslationKey:
     """O que identifica uma tradução além do texto: obra, idiomas e motor/modelo usados."""
 
@@ -63,6 +118,12 @@ class TranslationKey:
     target: str
     engine: str
     model: str
+
+
+# Busca aproximada: o OCR às vezes lê um risco do desenho como um caractere a mais ou diferente
+# (「一宿題…」 x 「・宿題…」). Falas curtas ficam de fora: nelas uma letra muda o sentido (はい x はあ).
+FUZZY_MIN_LENGTH = 4
+FUZZY_MIN_RATIO = 0.8
 
 
 def normalize(text: str) -> str:
@@ -120,7 +181,42 @@ class Database:
     # --- traduções --------------------------------------------------------------
 
     def find_translations(self, key: TranslationKey, texts: list[str]) -> dict[str, str]:
-        """Traduções já salvas para os textos (normalizados), pelo texto."""
+        """Traduções já salvas para os textos, indexadas pelo texto normalizado.
+
+        Primeiro pelo texto exato; o que faltar, por semelhança com os textos já traduzidos na mesma chave.
+        """
+        found = self._find_exact(key, texts)
+        missing = {normalize(t) for t in texts if t.strip()} - found.keys()
+        missing = {t for t in missing if len(t) >= FUZZY_MIN_LENGTH}
+        if missing:
+            found.update(self._find_similar(key, missing))
+        return found
+
+    def _find_similar(self, key: TranslationKey, texts: set[str]) -> dict[str, str]:
+        with self._lock:
+            candidates = self._conn.execute(
+                """SELECT texto_original, traducao FROM traducoes
+                   WHERE IFNULL(obra_id, 0) = ? AND idioma_origem = ? AND idioma_destino = ? AND motor = ? AND modelo = ?
+                     AND length(texto_original) >= ?""",
+                (key.work_id or 0, key.source, key.target, key.engine, key.model, FUZZY_MIN_LENGTH),
+            ).fetchall()
+        found = {}
+        for text in texts:
+            best, best_ratio = None, FUZZY_MIN_RATIO
+            for original, translation in candidates:
+                if abs(len(original) - len(text)) > max(2, len(text) // 3):
+                    continue
+                matcher = SequenceMatcher(None, text, original, autojunk=False)
+                if matcher.quick_ratio() < best_ratio:
+                    continue
+                ratio = matcher.ratio()
+                if ratio >= best_ratio:
+                    best, best_ratio = translation, ratio
+            if best is not None:
+                found[text] = best
+        return found
+
+    def _find_exact(self, key: TranslationKey, texts: list[str]) -> dict[str, str]:
         wanted = {normalize(t) for t in texts if t.strip()}
         if not wanted:
             return {}
@@ -168,3 +264,83 @@ class Database:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) FROM traducoes WHERE IFNULL(obra_id, 0) = ?", (work_id or 0,)).fetchone()
         return row[0]
+
+    # --- capítulos importados ---------------------------------------------------
+
+    def add_chapter(self, work_id: int, name: str, order: float, origin: str, files: list[str]) -> int | None:
+        """Registra o capítulo e suas páginas como pendentes. None se essa origem já foi importada na obra."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                cursor = self._conn.execute(
+                    "INSERT OR IGNORE INTO capitulos (obra_id, nome, ordem, origem) VALUES (?, ?, ?, ?)",
+                    (work_id, name, order, origin),
+                )
+                if cursor.rowcount == 0:
+                    self._conn.execute("ROLLBACK")
+                    return None
+                chapter_id = cursor.lastrowid
+                self._conn.executemany(
+                    "INSERT INTO paginas (capitulo_id, numero, arquivo) VALUES (?, ?, ?)",
+                    [(chapter_id, number, file) for number, file in enumerate(files, start=1)],
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return chapter_id
+
+    def pending_pages(self, work_id: int | None = None) -> list[PendingPage]:
+        """Páginas ainda não lidas, na ordem de leitura (obra, capítulo, página). Todas as obras se work_id for None."""
+        query = """SELECT p.id, o.id, o.idioma_origem, c.nome, c.origem, p.numero, p.arquivo
+                   FROM paginas p JOIN capitulos c ON c.id = p.capitulo_id JOIN obras o ON o.id = c.obra_id
+                   WHERE p.estado = 'pendente'"""
+        params: tuple = ()
+        if work_id is not None:
+            query += " AND o.id = ?"
+            params = (work_id,)
+        query += " ORDER BY o.id, c.ordem, c.nome, p.numero"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [PendingPage(*row) for row in rows]
+
+    def save_page_texts(self, page_id: int, regions: list[tuple[tuple[int, int, int, int], str]]) -> None:
+        """Grava o texto lido de cada balão (na ordem de leitura) e marca a página como lida.
+
+        Substitui o que houver: reprocessar uma página nunca duplica balões.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN")
+            self._conn.execute("DELETE FROM regioes WHERE pagina_id = ?", (page_id,))
+            self._conn.executemany(
+                "INSERT INTO regioes (pagina_id, ordem, x0, y0, x1, y1, texto_original) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(page_id, order, *box, text) for order, (box, text) in enumerate(regions, start=1)],
+            )
+            self._conn.execute("UPDATE paginas SET estado = 'lida', erro = NULL WHERE id = ?", (page_id,))
+            self._conn.execute("COMMIT")
+
+    def mark_page_error(self, page_id: int, message: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE paginas SET estado = 'erro', erro = ? WHERE id = ?", (message, page_id))
+
+    def retry_errors(self, work_id: int) -> int:
+        """Volta para pendente as páginas com erro da obra (ex.: arquivo que estava fora do lugar)."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """UPDATE paginas SET estado = 'pendente', erro = NULL
+                   WHERE estado = 'erro' AND capitulo_id IN (SELECT id FROM capitulos WHERE obra_id = ?)""",
+                (work_id,),
+            )
+        return cursor.rowcount
+
+    def chapters(self, work_id: int) -> list[ChapterSummary]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT c.id, c.nome, COUNT(p.id),
+                          SUM(p.estado = 'lida'), SUM(p.estado = 'erro'),
+                          (SELECT COUNT(*) FROM regioes r JOIN paginas p2 ON p2.id = r.pagina_id WHERE p2.capitulo_id = c.id)
+                   FROM capitulos c LEFT JOIN paginas p ON p.capitulo_id = c.id
+                   WHERE c.obra_id = ? GROUP BY c.id ORDER BY c.ordem, c.nome""",
+                (work_id,),
+            ).fetchall()
+        return [ChapterSummary(r[0], r[1], r[2], r[3] or 0, r[4] or 0, r[5]) for r in rows]

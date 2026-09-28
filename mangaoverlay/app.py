@@ -10,19 +10,24 @@ import signal
 import sys
 from dataclasses import replace
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
-from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
+from pathlib import Path
+
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot
 from .config import ENGINES, Config
 from .db import Database
+from .importer import Importer
+from .sources import discover
 from .hotkeys import HotkeyManager
 from .languages import AUTO, SOURCES, TARGETS, source_name, target_name
 from .pipeline import Pipeline
 from .platform_info import is_wayland
 from .render import base_font
 from .ui.icon import app_icon
+from .ui.importwindow import ImportWindow
 from .ui.overlay import OverlayWindow
 from .ui.settings import SettingsDialog
 
@@ -55,6 +60,11 @@ class MangaOverlayApp(QObject):
     def __init__(self, qapp: QApplication):
         super().__init__()
         self._qapp = qapp
+        # Primeiro de tudo: se outra instância já estiver rodando, AlreadyRunning sai daqui antes de
+        # carregar qualquer coisa. Comandos que chegarem antes do fim da inicialização ficam na fila do Qt.
+        self.ipc_command.connect(self._on_hotkey, Qt.ConnectionType.QueuedConnection)
+        self._ipc = ipc.Server(self.ipc_command.emit)
+        self._ipc.start()
         self.config = Config.load()
         self.db = Database()
         if self.db.work(self.config.current_work) is None:
@@ -68,6 +78,13 @@ class MangaOverlayApp(QObject):
         self._busy = False
         self._settings_open = False
 
+        self.importer = Importer(self.db, self.pipeline, self)
+        self._import_window = ImportWindow()
+        self._import_window.setWindowIcon(app_icon())
+        self._import_window.stop_requested.connect(self.importer.stop)
+        self.importer.progress.connect(self._import_window.update_progress)
+        self.importer.finished.connect(self._on_import_finished)
+
         self._build_tray()
         self.status.connect(lambda message: self._notify(message, 5000))
 
@@ -75,10 +92,8 @@ class MangaOverlayApp(QObject):
         self.hotkeys.triggered.connect(self._on_hotkey)
         self._apply_hotkeys()
 
-        self.ipc_command.connect(self._on_hotkey)
-        self._ipc = ipc.Server(self.ipc_command.emit)
-        self._ipc.start()
         self._warm_up()
+        self._resume_import(silent=True)
 
     def _warm_up(self) -> None:
         # Na fila de trabalho: um atalho apertado durante o carregamento só espera a vez
@@ -114,6 +129,10 @@ class MangaOverlayApp(QObject):
         self._engine_group = self._choice_actions(self._engine_menu, [(label, key) for key, label in ENGINES.items()], "engine")
 
         menu.addSeparator()
+        menu.addAction("Importar capítulos…", self._import_chapters)
+        self._resume_action = menu.addAction("", lambda: self._resume_import(silent=False))
+        self._import_progress_action = menu.addAction("Ver progresso da importação", self._import_window.show)
+        menu.aboutToShow.connect(self._refresh_import_actions)
         menu.addAction("Esquecer as traduções desta obra…", self._forget_translations)
         menu.addAction("Configurações…", self.open_settings)
         menu.addAction("Sair", self.quit)
@@ -153,6 +172,93 @@ class MangaOverlayApp(QObject):
         ):
             for action in group.actions():
                 action.setChecked(action.data() == value)
+
+    def _refresh_import_actions(self) -> None:
+        running = self.importer.running
+        pending = 0 if running else len(self.db.pending_pages())
+        self._resume_action.setText(f"Retomar importação ({pending} página(s) pendente(s))")
+        self._resume_action.setVisible(pending > 0)
+        self._import_progress_action.setVisible(running)
+
+    # --- importação -----------------------------------------------------------
+
+    def _import_chapters(self) -> None:
+        if self.importer.running:
+            self._import_window.show()
+            self._notify("Já há uma importação em andamento; espere terminar para importar mais.", 5000)
+            return
+        if self.config.current_work is None:
+            QMessageBox.information(None, APP_DISPLAY_NAME, "Escolha ou crie primeiro a obra a que os capítulos pertencem.")
+            self._new_work()
+            if self.config.current_work is None:
+                return
+        work = self.db.work(self.config.current_work)
+
+        choice = QMessageBox(QMessageBox.Icon.Question, APP_DISPLAY_NAME, f"Importar capítulos para “{work.name}”.\n\nO que você quer escolher?")
+        files_button = choice.addButton("Arquivos CBZ/ZIP/PDF…", QMessageBox.ButtonRole.AcceptRole)
+        folder_button = choice.addButton("Uma pasta…", QMessageBox.ButtonRole.AcceptRole)
+        choice.addButton(QMessageBox.StandardButton.Cancel)
+        choice.setInformativeText(
+            "Uma pasta de imagens é um capítulo. Uma pasta com subpastas, CBZs ou PDFs vira vários capítulos."
+        )
+        choice.exec()
+        if choice.clickedButton() is files_button:
+            names, _ = QFileDialog.getOpenFileNames(
+                None, "Capítulos", str(Path.home()), "Capítulos (*.cbz *.zip *.pdf *.png *.jpg *.jpeg *.webp)"
+            )
+            paths = [Path(n) for n in names]
+        elif choice.clickedButton() is folder_button:
+            folder = QFileDialog.getExistingDirectory(None, "Pasta com os capítulos", str(Path.home()))
+            paths = [Path(folder)] if folder else []
+        else:
+            return
+        if not paths:
+            return
+
+        chapters, warnings = discover(paths)
+        if not chapters:
+            QMessageBox.warning(None, APP_DISPLAY_NAME, "Nenhum capítulo encontrado.\n\n" + "\n".join(warnings[:10]))
+            return
+        pages = sum(len(c.files) for c in chapters)
+        listing = "\n".join(f"• {c.name} ({len(c.files)} págs)" for c in chapters[:15])
+        if len(chapters) > 15:
+            listing += f"\n… e mais {len(chapters) - 15}"
+        notes = ("\n\nIgnorados:\n" + "\n".join(warnings[:5])) if warnings else ""
+        answer = QMessageBox.question(
+            None,
+            APP_DISPLAY_NAME,
+            f"{len(chapters)} capítulo(s), {pages} página(s), para “{work.name}” ({source_name(work.source_lang)}):\n\n"
+            f"{listing}{notes}\n\nA leitura dos balões roda na sua GPU (sem custo de API). Importar?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        added = skipped = 0
+        for chapter in chapters:
+            if self.db.add_chapter(work.id, chapter.name, chapter.order, chapter.origin, chapter.files) is None:
+                skipped += 1
+            else:
+                added += 1
+        if skipped:
+            self._notify(f"{skipped} capítulo(s) já tinham sido importados nesta obra e foram ignorados.", 6000)
+        if added:
+            self._resume_import(silent=False)
+
+    def _resume_import(self, silent: bool) -> None:
+        """Processa as páginas pendentes. Ao abrir o app (silent), só avisa pela bandeja."""
+        pending = len(self.db.pending_pages())
+        if pending == 0 or not self.importer.start(self.config):
+            return
+        if silent:
+            self._notify(f"Retomando a importação: {pending} página(s) pendente(s).", 5000)
+        else:
+            self._import_window.start(pending)
+
+    def _on_import_finished(self, summary) -> None:
+        self._import_window.show_summary(summary)
+        if not self._import_window.isVisible() and not summary.cancelled:
+            errors = f", {summary.errors} com erro" if summary.errors else ""
+            self._notify(f"Importação concluída: {summary.pages} página(s), {summary.texts} falas lidas{errors}.", 8000)
 
     def _fill_work_menu(self) -> None:
         """Lista montada na hora de abrir: sempre reflete o banco."""
@@ -372,6 +478,8 @@ class MangaOverlayApp(QObject):
         self._ipc.close()
         self.hide_translation()
         self.tray.hide()
+        self.importer.stop()  # o que faltar fica pendente e é retomado na próxima vez
+        self.importer.wait(10)
         self._pool.waitForDone(5000)  # não fecha o banco no meio de uma gravação
         self.db.close()
         self._qapp.quit()
@@ -402,7 +510,12 @@ def run(start_action: str | None = None) -> int:
     qapp.setWindowIcon(app_icon())
     signal.signal(signal.SIGINT, signal.SIG_DFL)  # Ctrl+C no terminal encerra
 
-    app = MangaOverlayApp(qapp)
+    try:
+        app = MangaOverlayApp(qapp)
+    except ipc.AlreadyRunning:
+        # Aberto ao mesmo tempo que outra instância: repassa o pedido para ela e sai
+        ipc.send(start_action or "show")
+        return 0
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.warning(
             None,

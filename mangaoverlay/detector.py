@@ -86,11 +86,14 @@ class Detector:
             else:
                 crops.append(image.crop((x, y, x + side, y + side)))
 
-        inputs = self.processor(images=crops, return_tensors="pt").to(self.device)
-        with torch.inference_mode():
-            outputs = self.model(**inputs)
-        sizes = [(c.height, c.width) for c in crops]
-        results = self.processor.post_process_object_detection(outputs, target_sizes=sizes, threshold=0.25)
+        results = []
+        for start in range(0, len(crops), 8):  # webtoons muito altos viram dezenas de pedaços: lotes de até 8
+            chunk = crops[start : start + 8]
+            inputs = self.processor(images=chunk, return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                outputs = self.model(**inputs)
+            sizes = [(c.height, c.width) for c in chunk]
+            results += self.processor.post_process_object_detection(outputs, target_sizes=sizes, threshold=0.25)
 
         detections = []
         for (tx, ty, _side), crop, result in zip(tiles, crops, results):
