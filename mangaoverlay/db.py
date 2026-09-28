@@ -838,3 +838,19 @@ class Database:
     def mark_summarized(self, chapter_id: int) -> None:
         with self._lock:
             self._conn.execute("UPDATE capitulos SET resumido = 1 WHERE id = ?", (chapter_id,))
+
+    # --- revisão de nomes ------------------------------------------------------------
+
+    def work_translations(self, work_id: int) -> list[tuple[int, str, str]]:
+        """(id, texto original normalizado, tradução) de todas as traduções salvas da obra (qualquer motor)."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT id, texto_original, traducao FROM traducoes WHERE obra_id = ? ORDER BY id", (work_id,)
+            ).fetchall()
+
+    def update_translations(self, changes: list[tuple[int, str]]) -> None:
+        """Grava traduções corrigidas: (id da tradução, novo texto)."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            self._conn.executemany("UPDATE traducoes SET traducao = ? WHERE id = ?", [(text, i) for i, text in changes])
+            self._conn.execute("COMMIT")

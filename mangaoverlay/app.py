@@ -31,6 +31,7 @@ from .ui.batchdialog import BatchDialog, BatchWindow
 from .ui.characters import CharactersDialog
 from .ui.icon import app_icon
 from .ui.memorydialog import MemoryDialog
+from .ui.namereview import NameReviewDialog
 from .ui.importwindow import ImportWindow
 from .ui.overlay import OverlayWindow
 from .ui.settings import SettingsDialog
@@ -148,6 +149,7 @@ class MangaOverlayApp(QObject):
         menu.addSeparator()
         self._characters_action = menu.addAction("Personagens da obra…", self._open_characters)
         self._memory_action = menu.addAction("Memória da obra…", self._open_memory)
+        self._names_action = menu.addAction("Revisar nomes nas traduções…", self._review_names)
         menu.addAction("Importar capítulos…", self._import_chapters)
         self._batch_action = menu.addAction("Traduzir capítulos…", self._translate_chapters)
         self._batch_resume_action = menu.addAction("", lambda: self._resume_batches(silent=False))
@@ -186,6 +188,7 @@ class MangaOverlayApp(QObject):
         self._work_menu.setTitle(f"Obra: {work.name if work else 'nenhuma'}")
         self._characters_action.setEnabled(work is not None)
         self._memory_action.setEnabled(work is not None)
+        self._names_action.setEnabled(work is not None)
         self._source_menu.setTitle(f"Origem: {source_name(c.source_lang)}")
         self._target_menu.setTitle(f"Destino: {target_name(c.target_lang)}")
         self._engine_menu.setTitle(f"Motor: {ENGINES[c.engine]}")
@@ -216,7 +219,20 @@ class MangaOverlayApp(QObject):
             return
         dialog = CharactersDialog(self.db, work, replace(self.config))
         dialog.setWindowIcon(app_icon())
-        dialog.exec()
+        if dialog.exec() == CharactersDialog.DialogCode.Accepted and dialog.renames:
+            # Grafia mudou: propõe corrigir as traduções já salvas (grátis, sem retraduzir)
+            self._review_names(dialog.renames)
+
+    def _review_names(self, renames: list[tuple[str, str]] | None = None) -> None:
+        work = self.db.work(self.config.current_work)
+        if work is None:
+            return
+        dialog = NameReviewDialog(self.db, work, replace(self.config), renames)
+        dialog.setWindowIcon(app_icon())
+        if dialog.exec() == NameReviewDialog.DialogCode.Accepted and dialog.applied:
+            # A leitura guarda traduções na memória da sessão: esvazia para mostrar as corrigidas
+            self._pool.start(_Job(self.pipeline.clear_cache))
+            self._notify(f"{dialog.applied} tradução(ões) corrigida(s).", 5000)
 
     def _open_memory(self) -> None:
         work = self.db.work(self.config.current_work)

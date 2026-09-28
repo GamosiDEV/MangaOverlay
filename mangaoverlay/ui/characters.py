@@ -70,7 +70,9 @@ class CharactersDialog(QDialog):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setMinimumSectionSize(110)
         for character in db.characters(work.id):
-            self._add_row(character)
+            self._add_row(character, saved=True)
+        # Trocas de grafia feitas nesta sessão (nome antigo, nome novo): propostas para as traduções salvas
+        self.renames: list[tuple[str, str]] = []
 
         add = QPushButton("Adicionar")
         add.clicked.connect(lambda: self._add_row(Character(name=""), edit=True))
@@ -138,7 +140,7 @@ class CharactersDialog(QDialog):
 
     # --- tabela -----------------------------------------------------------------
 
-    def _add_row(self, character: Character, edit: bool = False, highlight: bool = False) -> None:
+    def _add_row(self, character: Character, edit: bool = False, highlight: bool = False, saved: bool = False) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
         for column, value in ((0, character.name), (1, character.original), (3, character.speech), (4, character.notes)):
@@ -146,6 +148,9 @@ class CharactersDialog(QDialog):
             if highlight:
                 item.setBackground(_NEW_ROW)
             self.table.setItem(row, column, item)
+        if saved:
+            # Nome como estava salvo: se mudar, as traduções já feitas podem ser corrigidas
+            self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, character.name)
         gender = QComboBox()
         gender.addItems(["—" if g == "" else g for g in _GENDERS])
         gender.setCurrentIndex(_GENDERS.index(character.gender) if character.gender in _GENDERS else 0)
@@ -181,6 +186,14 @@ class CharactersDialog(QDialog):
                 self, APP_DISPLAY_NAME, "Falta o nome na tradução de: " + ", ".join(unnamed) + ".\n\nPreencha ou remova essas linhas."
             )
             return
+        self.renames = [
+            (self.table.item(row, 0).data(Qt.ItemDataRole.UserRole), characters[row].name)
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0) is not None
+            and self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            and characters[row].name
+            and self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) != characters[row].name
+        ]
         self._db.save_characters(self._work.id, [c for c in characters if c.name])
         self._db.mark_names_surveyed(self._surveyed)
         super().accept()

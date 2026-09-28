@@ -98,11 +98,11 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 ### Fase 7: Revisão de nomes
 
-- [ ] Correção local: substituir nas traduções salvas as variações conhecidas de cada nome da lista.
-- [ ] Revisão com IA só das falas com nomes novos ou suspeitos, com opção de revisar a obra inteira.
-- [ ] Mostrar o que foi alterado antes de gravar.
+- [x] Correção local: substituir nas traduções salvas as variações de cada nome da lista (grafia parecida, mantendo o tratamento; palavras comuns como "Minha" nunca são trocadas) e propagar trocas de grafia feitas na lista.
+- [x] Revisão com IA só das falas que citam o personagem no original mas não trazem o nome na tradução, com opção de revisar a obra inteira; custo estimado antes e real depois.
+- [x] Mostrar o que foi alterado antes de gravar (tela com antes → depois, motivo e caixas para desmarcar).
 
-**Pronto quando:** trocar a grafia de um personagem na lista corrige todos os capítulos já traduzidos sem nova tradução completa.
+**Pronto quando:** trocar a grafia de um personagem na lista corrige todos os capítulos já traduzidos sem nova tradução completa. ✅ Verificado: Mina → Mena na lista propôs a troca nas duas traduções afetadas e gravou só a marcada; a revisão com IA real corrigiu "O professor chegou!" → "O professor Sakura chegou!" e "Minha, vamos!" → "Mina, vamos!" (US$ 0,00016).
 
 ### Fase 8: Tempo real (pendente desde antes)
 

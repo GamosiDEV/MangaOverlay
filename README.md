@@ -74,6 +74,14 @@ O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: O
 
 Os dois levantamentos mostram o custo estimado antes de enviar e trazem as sugestões destacadas para revisão; nada é salvo sem clicar em Salvar. Capítulos já analisados não são lidos de novo nos próximos levantamentos.
 
+## Revisar nomes
+
+"Revisar nomes nas traduções…" no menu corrige nomes de personagens nas traduções já salvas da obra, usando a lista de personagens. Nada é gravado sem aparecer antes numa lista (original, antes, depois e motivo), onde dá para desmarcar o que não quiser.
+
+- **Grátis:** se o original da fala cita o personagem (春斗) e a tradução traz uma grafia parecida e errada ("Harutou-kun"), troca pelo nome da lista mantendo o tratamento ("Haruto-kun"). Palavras comuns parecidas com nomes (Minha × Mina) nunca são trocadas.
+- **Com IA:** falas que citam o personagem no original, mas em que o nome não aparece na tradução (o modelo usou um pronome, por exemplo), vão para o modelo principal, com o custo mostrado antes. Dá para revisar a obra inteira também.
+- **Mudou a grafia na lista:** ao salvar a lista de personagens com um nome alterado, a mesma tela abre com a troca proposta em todas as traduções já feitas, sem retraduzir nada.
+
 ## Memória da obra
 
 Além da lista de personagens, cada obra tem uma memória que vai junto em toda tradução com IA:
