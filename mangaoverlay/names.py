@@ -119,7 +119,7 @@ class SurveyPlan:
     def description(self) -> str:
         names = ", ".join(c.name for c in self.chapters[:3]) + ("…" if len(self.chapters) > 3 else "")
         return (
-            f"{len(self.chapters)} capítulo(s) ({names}), ~{self.input_tokens:,} tokens de texto".replace(",", ".")
+            f"{len(self.chapters)} capítulo(s) ({names}), ~{pricing.thousands(self.input_tokens)} tokens de texto"
             + f", {self.requests} pedido(s) ao modelo {self.model}. Custo estimado: {pricing.format_cost(self.estimated_cost)}."
         )
 
@@ -175,11 +175,11 @@ def run_survey(db: Database, work_id: int, plan: SurveyPlan, source: str, target
         text = "\n\n".join(f"### {c.name}\n" + "\n".join(c.texts) for c in chunk)
         instructions = _instructions(source, target, known + list(found.values()))
         if plan.provider == "openai":
-            raw = llm_openai.structured(
+            raw, _usage = llm_openai.structured(
                 credentials.get_key(credentials.OPENAI), plan.model, instructions, text, _SCHEMA, "characters"
             )
         else:
-            raw = llm_anthropic.structured(
+            raw, _usage = llm_anthropic.structured(
                 credentials.get_key(credentials.ANTHROPIC), plan.model, instructions, [{"type": "text", "text": text}], _SCHEMA
             )
         try:

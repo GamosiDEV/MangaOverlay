@@ -90,6 +90,40 @@ _MIGRATIONS = [
     );
     ALTER TABLE capitulos ADD COLUMN nomes_levantados INTEGER NOT NULL DEFAULT 0;
     """,
+    # 4: tradução em lote. Cada requisição cobre um bloco de páginas; as falas enviadas são calculadas na
+    # hora (só o que ainda não tem tradução), então retomar ou reenviar nunca paga duas vezes a mesma fala.
+    """
+    CREATE TABLE lotes (
+        id INTEGER PRIMARY KEY,
+        obra_id INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+        motor TEXT NOT NULL,
+        modelo TEXT NOT NULL,
+        idioma_origem TEXT NOT NULL,
+        idioma_destino TEXT NOT NULL,
+        paginas_por_bloco INTEGER NOT NULL,
+        estado TEXT NOT NULL DEFAULT 'ativo' CHECK (estado IN ('ativo', 'pausado', 'concluido', 'cancelado')),
+        erro TEXT,
+        custo_estimado REAL,
+        criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE requisicoes (
+        id INTEGER PRIMARY KEY,
+        lote_id INTEGER NOT NULL REFERENCES lotes(id) ON DELETE CASCADE,
+        ordem INTEGER NOT NULL,
+        estado TEXT NOT NULL DEFAULT 'pendente' CHECK (estado IN ('pendente', 'concluida', 'falhou')),
+        tentativas INTEGER NOT NULL DEFAULT 0,
+        erro TEXT,
+        tokens_entrada INTEGER NOT NULL DEFAULT 0,
+        tokens_cache INTEGER NOT NULL DEFAULT 0,
+        tokens_saida INTEGER NOT NULL DEFAULT 0,
+        custo REAL NOT NULL DEFAULT 0
+    );
+    CREATE TABLE requisicao_paginas (
+        requisicao_id INTEGER NOT NULL REFERENCES requisicoes(id) ON DELETE CASCADE,
+        pagina_id INTEGER NOT NULL REFERENCES paginas(id) ON DELETE CASCADE,
+        PRIMARY KEY (requisicao_id, pagina_id)
+    );
+    """,
 ]
 
 
@@ -137,6 +171,48 @@ class ChapterTexts:
     id: int
     name: str
     texts: list[str]
+
+
+@dataclass(frozen=True)
+class SourceLine:
+    """Uma fala de capítulo importado, com a localização (para marcar mudança de página no pedido)."""
+
+    chapter: str
+    page: int
+    text: str
+
+
+@dataclass(frozen=True)
+class Batch:
+    id: int
+    work_id: int
+    engine: str
+    model: str
+    source_lang: str
+    target_lang: str
+    pages_per_block: int
+    state: str
+    error: str | None
+    estimated_cost: float | None
+
+
+@dataclass(frozen=True)
+class BatchRequest:
+    id: int
+    order: int
+    state: str
+    attempts: int
+
+
+@dataclass(frozen=True)
+class BatchSummary:
+    requests: int
+    done: int
+    failed: int
+    input_tokens: int
+    cached_tokens: int
+    output_tokens: int
+    cost: float
 
 
 @dataclass(frozen=True)
@@ -210,17 +286,36 @@ class Database:
 
     # --- traduções --------------------------------------------------------------
 
-    def find_translations(self, key: TranslationKey, texts: list[str]) -> dict[str, str]:
+    def find_translations(
+        self, key: TranslationKey, texts: list[str], also_engines: tuple[str, ...] = (), fuzzy: bool = True
+    ) -> dict[str, str]:
         """Traduções já salvas para os textos, indexadas pelo texto normalizado.
 
         Primeiro pelo texto exato; o que faltar, por semelhança com os textos já traduzidos na mesma chave.
+        `also_engines`: se ainda faltar, aceita traduções desses motores (qualquer modelo) na mesma obra e idiomas
+        (ex.: ler com o modo visão uma obra traduzida em lote com o mesmo provedor no modo texto).
         """
         found = self._find_exact(key, texts)
         missing = {normalize(t) for t in texts if t.strip()} - found.keys()
-        missing = {t for t in missing if len(t) >= FUZZY_MIN_LENGTH}
-        if missing:
-            found.update(self._find_similar(key, missing))
+        if fuzzy and {t for t in missing if len(t) >= FUZZY_MIN_LENGTH}:
+            found.update(self._find_similar(key, {t for t in missing if len(t) >= FUZZY_MIN_LENGTH}))
+        for engine in also_engines:
+            missing = {normalize(t) for t in texts if t.strip()} - found.keys()
+            if not missing:
+                break
+            for model in self._models_for(key, engine):
+                other = TranslationKey(key.work_id, key.source, key.target, engine, model)
+                found.update(self.find_translations(other, sorted(missing - found.keys())))
         return found
+
+    def _models_for(self, key: TranslationKey, engine: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT modelo FROM traducoes WHERE IFNULL(obra_id, 0) = ? AND idioma_origem = ? AND idioma_destino = ?
+                   AND motor = ? GROUP BY modelo ORDER BY MAX(id) DESC""",
+                (key.work_id or 0, key.source, key.target, engine),
+            ).fetchall()
+        return [row[0] for row in rows]
 
     def _find_similar(self, key: TranslationKey, texts: set[str]) -> dict[str, str]:
         with self._lock:
@@ -435,3 +530,120 @@ class Database:
             ).fetchall()
             screen = self._conn.execute("SELECT texto_original FROM traducoes WHERE obra_id = ?", (work_id,)).fetchall()
         return [row[0] for row in imported + screen]
+
+    # --- tradução em lote ------------------------------------------------------------
+
+    def chapter_lines(self, chapter_ids: list[int]) -> dict[int, list[tuple[int, str]]]:
+        """Por capítulo: (página, texto) de cada fala lida, em ordem de leitura."""
+        if not chapter_ids:
+            return {}
+        marks = ",".join("?" * len(chapter_ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT c.id, p.id, r.texto_original FROM capitulos c JOIN paginas p ON p.capitulo_id = c.id
+                    JOIN regioes r ON r.pagina_id = p.id WHERE c.id IN ({marks})
+                    ORDER BY c.ordem, c.nome, p.numero, r.ordem""",
+                chapter_ids,
+            ).fetchall()
+        result: dict[int, list[tuple[int, str]]] = {}
+        for chapter_id, page_id, text in rows:
+            result.setdefault(chapter_id, []).append((page_id, text))
+        return result
+
+    def chapter_pages(self, chapter_ids: list[int]) -> list[int]:
+        """Páginas lidas dos capítulos, na ordem de leitura."""
+        if not chapter_ids:
+            return []
+        marks = ",".join("?" * len(chapter_ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT p.id FROM paginas p JOIN capitulos c ON c.id = p.capitulo_id
+                    WHERE c.id IN ({marks}) AND p.estado = 'lida' ORDER BY c.ordem, c.nome, p.numero""",
+                chapter_ids,
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def create_batch(
+        self, work_id: int, key: TranslationKey, pages_per_block: int, page_ids: list[int], estimated_cost: float | None
+    ) -> int:
+        """Cria o lote e uma requisição pendente para cada bloco de páginas."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            cursor = self._conn.execute(
+                """INSERT INTO lotes (obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, custo_estimado)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (work_id, key.engine, key.model, key.source, key.target, pages_per_block, estimated_cost),
+            )
+            batch_id = cursor.lastrowid
+            for order, start in enumerate(range(0, len(page_ids), pages_per_block), start=1):
+                request_id = self._conn.execute(
+                    "INSERT INTO requisicoes (lote_id, ordem) VALUES (?, ?)", (batch_id, order)
+                ).lastrowid
+                self._conn.executemany(
+                    "INSERT INTO requisicao_paginas (requisicao_id, pagina_id) VALUES (?, ?)",
+                    [(request_id, page_id) for page_id in page_ids[start : start + pages_per_block]],
+                )
+            self._conn.execute("COMMIT")
+        return batch_id
+
+    def batches(self, states: tuple[str, ...] = ("ativo",)) -> list[Batch]:
+        marks = ",".join("?" * len(states))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT id, obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, estado, erro,
+                           custo_estimado FROM lotes WHERE estado IN ({marks}) ORDER BY id""",
+                states,
+            ).fetchall()
+        return [Batch(*row) for row in rows]
+
+    def batch_requests(self, batch_id: int, states: tuple[str, ...] = ("pendente",)) -> list[BatchRequest]:
+        marks = ",".join("?" * len(states))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, ordem, estado, tentativas FROM requisicoes WHERE lote_id = ? AND estado IN ({marks}) ORDER BY ordem",
+                (batch_id, *states),
+            ).fetchall()
+        return [BatchRequest(*row) for row in rows]
+
+    def request_lines(self, request_id: int) -> list[SourceLine]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT c.nome, p.numero, r.texto_original FROM requisicao_paginas rp
+                   JOIN paginas p ON p.id = rp.pagina_id JOIN capitulos c ON c.id = p.capitulo_id
+                   JOIN regioes r ON r.pagina_id = p.id WHERE rp.requisicao_id = ?
+                   ORDER BY c.ordem, c.nome, p.numero, r.ordem""",
+                (request_id,),
+            ).fetchall()
+        return [SourceLine(*row) for row in rows]
+
+    def record_request(
+        self, request_id: int, state: str, usage: tuple[int, int, int], cost: float, error: str | None = None
+    ) -> None:
+        """Acumula o uso/custo (uma requisição pode precisar de mais de uma chamada) e grava o estado."""
+        with self._lock:
+            self._conn.execute(
+                """UPDATE requisicoes SET estado = ?, erro = ?, tentativas = tentativas + 1,
+                   tokens_entrada = tokens_entrada + ?, tokens_cache = tokens_cache + ?, tokens_saida = tokens_saida + ?,
+                   custo = custo + ? WHERE id = ?""",
+                (state, error, *usage, cost, request_id),
+            )
+
+    def set_batch_state(self, batch_id: int, state: str, error: str | None = None) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE lotes SET estado = ?, erro = ? WHERE id = ?", (state, error, batch_id))
+
+    def retry_failed_requests(self, batch_id: int) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE requisicoes SET estado = 'pendente', erro = NULL WHERE lote_id = ? AND estado = 'falhou'", (batch_id,)
+            )
+        return cursor.rowcount
+
+    def batch_summary(self, batch_id: int) -> BatchSummary:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*), SUM(estado = 'concluida'), SUM(estado = 'falhou'), SUM(tokens_entrada),
+                          SUM(tokens_cache), SUM(tokens_saida), SUM(custo) FROM requisicoes WHERE lote_id = ?""",
+                (batch_id,),
+            ).fetchone()
+        return BatchSummary(*(value or 0 for value in row))

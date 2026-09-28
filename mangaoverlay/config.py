@@ -51,6 +51,8 @@ class Config:
     # Levantamento de nomes: o rápido usa o modelo principal nos primeiros capítulos ainda não analisados;
     # o completo usa estes modelos baratos em todos
     names_quick_chapters: int = 3
+    # Tradução em lote: quantas páginas vão em cada pedido à API
+    batch_pages_per_block: int = 20
     names_model_openai: str = "gpt-5.4-nano"
     names_model_claude: str = "claude-haiku-4-5"
     # Usa a GPU (CUDA) para os modelos locais, se houver

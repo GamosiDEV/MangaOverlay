@@ -15,13 +15,38 @@ from .languages import AUTO, SOURCES, TARGETS, source_english, target_english
 
 
 class TranslationError(Exception):
-    pass
+    """Falha ao traduzir. `retryable`: erro temporário (limite de requisições, servidor, rede) que vale tentar de novo."""
+
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class MalformedResponse(TranslationError):
+    """O modelo respondeu, mas fora do formato esperado (vale pedir de novo)."""
+
+
+@dataclass
+class Usage:
+    """Tokens cobrados pela API numa chamada (zero nos motores locais/gratuitos)."""
+
+    input_tokens: int = 0
+    cached_tokens: int = 0  # parte da entrada lida do cache de prompt (mais barata)
+    output_tokens: int = 0
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            self.input_tokens + other.input_tokens,
+            self.cached_tokens + other.cached_tokens,
+            self.output_tokens + other.output_tokens,
+        )
 
 
 @dataclass
 class Line:
     id: int
     text: str  # vazio no modo visão (o LLM lê a imagem)
+    where: str = ""  # "Cap 3, p. 12" na tradução em lote: marca a mudança de cena
 
 
 @dataclass
@@ -51,7 +76,8 @@ def translate_google(lines: list[Line], source: str, target: str) -> list[Result
     except TooManyRequests as exc:
         raise TranslationError(
             "O Google gratuito bloqueou temporariamente as requisições da sua rede (erro 429). "
-            "Tente mais tarde ou troque o motor no menu da bandeja."
+            "Tente mais tarde ou troque o motor no menu da bandeja.",
+            retryable=True,
         ) from exc
     except Exception as exc:  # deep-translator repassa erros próprios e de rede/HTTP variados
         raise TranslationError(f"Erro no Google Tradutor: {exc}") from exc
@@ -153,7 +179,8 @@ def response_schema(vision: bool) -> dict:
 
 
 def text_request(lines: list[Line], context: list[str]) -> str:
-    payload = {"context": context, "texts": [{"id": line.id, "text": line.text} for line in lines]}
+    texts = [{"id": line.id, "page": line.where, "text": line.text} if line.where else {"id": line.id, "text": line.text} for line in lines]
+    payload = {"context": context, "texts": texts}
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -161,7 +188,7 @@ def parse_response(raw: str, lines: list[Line]) -> list[Result]:
     try:
         items = json.loads(raw)["items"]
     except (ValueError, KeyError, TypeError) as exc:
-        raise TranslationError(f"Resposta inesperada do modelo: {raw[:200]}") from exc
+        raise MalformedResponse(f"Resposta inesperada do modelo: {raw[:200]}") from exc
     by_id = {line.id: line for line in lines}
     results = []
     for item in items:

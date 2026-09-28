@@ -64,14 +64,15 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 ### Fase 4: Fila de envio com blocos configuráveis
 
-- [ ] Configuração "Páginas por requisição" (padrão 20), com teto calculado pelo limite de saída do modelo e aviso quando o valor pedido passa do teto.
-- [ ] Fila salva no banco: cada bloco é uma requisição independente.
-- [ ] Novas tentativas automáticas com espera crescente em erros temporários (limite de requisições, servidor, rede).
-- [ ] Validação da resposta: confere se todos os balões voltaram e pede de novo só os que faltaram.
-- [ ] Retomada após fechar o app: reenvia só o que estava pendente.
-- [ ] Estimativa de custo antes de enviar ("~600 páginas, ~US$ 0,30") e custo real registrado no fim.
+- [x] Configuração "Páginas por requisição" (padrão 20), com teto calculado pelo limite de saída do modelo e pelo tamanho estimado das páginas escolhidas; aviso e botão desativado acima do teto.
+- [x] Fila salva no banco (migração 4: `lotes`, `requisicoes`, `requisicao_paginas`): cada bloco é uma requisição independente. As falas são calculadas na hora de enviar, só com o que falta; repetidas vão uma vez.
+- [x] Novas tentativas automáticas com espera crescente em erros temporários (2, 5, 15, 30 e 60 s); se persistirem, o lote pausa. Erros definitivos pausam com a mensagem.
+- [x] Validação da resposta: pede de novo só as falas que faltaram (até 2 rodadas extras); respostas fora do formato também ganham nova rodada.
+- [x] Retomada após fechar o app: reenvia só o que estava pendente (automático ao abrir). "Pausar" pelo usuário só volta pelo menu.
+- [x] Estimativa de custo antes de enviar e custo real registrado no fim (uso de tokens informado pela API, inclusive cache).
+- [x] Na leitura, qualquer tradução já paga com IA da obra é reaproveitada, mesmo com outro motor ou modelo.
 
-**Pronto quando:** derrubar a internet no meio de um lote de 5 capítulos e reconectar termina o lote sem retraduzir o que já estava pronto.
+**Pronto quando:** derrubar a internet no meio de um lote de 5 capítulos e reconectar termina o lote sem retraduzir o que já estava pronto. ✅ Verificado com tradutor simulado (erros temporários, app fechado no meio, retomada só dos blocos restantes, nenhuma fala enviada duas vezes) e com a API real (lote de 6 falas: estimativa US$ 0,00049, custo real US$ 0,00027; leitura na tela depois, com o modo visão e com o NLLB, sem nenhuma chamada nova).
 
 ### Fase 5: Batch API da OpenAI
 

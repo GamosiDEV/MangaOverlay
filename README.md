@@ -50,6 +50,18 @@ A detecção dos balões e o OCR rodam na sua GPU, sem custo de API; o texto de 
 
 Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continua das páginas que faltavam ("Retomar importação" no menu também faz isso). Capítulos já importados na mesma obra são ignorados se escolhidos de novo.
 
+## Traduzir capítulos em lote
+
+"Traduzir capítulos…" no menu da bandeja traduz de uma vez os capítulos importados da obra atual, para depois ler na tela com a tradução aparecendo na hora, sem nova cobrança.
+
+- Escolha os capítulos (os já traduzidos vêm desmarcados) e quantas páginas vão em cada pedido à API (padrão 20). O app mostra o máximo seguro para o modelo, calculado pelo limite de saída dele e pelo tamanho das páginas escolhidas.
+- Antes de enviar aparecem as falas a traduzir e o custo estimado; no fim, o custo real informado pela API.
+- Falas repetidas (はい, え?!…) vão uma vez só, e falas já traduzidas nunca são enviadas de novo.
+- Erros temporários (limite de requisições, servidor, rede) são tentados de novo sozinhos; se persistirem, o lote pausa em vez de desperdiçar pedidos. Erros definitivos (chave inválida, sem crédito) pausam com a mensagem. Falas que o modelo esquecer de devolver são pedidas de novo, só elas.
+- Fechar o app no meio não perde nada: o lote continua sozinho ao abrir de novo. "Pausar" deixa o lote parado até "Retomar tradução em lote" no menu (que também tenta de novo os blocos que falharam).
+
+O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: OpenAI, Claude, NLLB offline (grátis) e Google gratuito. Na leitura, qualquer tradução já paga com IA da obra é usada, mesmo que você esteja lendo com outro motor ou modelo.
+
 ## Personagens da obra
 
 "Personagens da obra…" no menu da bandeja abre a lista de personagens da obra atual. Ela vai junto em toda tradução com IA (OpenAI ou Claude) daquela obra, para que cada personagem tenha sempre o mesmo nome, gênero e jeito de falar. O NLLB e o Google gratuito não usam a lista.

@@ -8,13 +8,13 @@ deixe a página sem tradução.
 import base64
 
 from .db import Character
-from .translators import Line, Result, TranslationError, llm_instructions, parse_response, response_schema, text_request
+from .translators import Line, Result, TranslationError, Usage, llm_instructions, parse_response, response_schema, text_request
 
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
-def structured(api_key: str, model: str, system: str, content: list[dict], schema: dict) -> str:
-    """Uma chamada com resposta em JSON garantida pelo schema. Retorna o texto JSON."""
+def structured(api_key: str, model: str, system: str, content: list[dict], schema: dict) -> tuple[str, Usage]:
+    """Uma chamada com resposta em JSON garantida pelo schema. Retorna o texto JSON e o uso de tokens."""
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key, timeout=180)
@@ -36,30 +36,40 @@ def structured(api_key: str, model: str, system: str, content: list[dict], schem
     except anthropic.NotFoundError as exc:
         raise TranslationError(f"Modelo do Claude não encontrado: {model}") from exc
     except anthropic.RateLimitError as exc:
-        raise TranslationError("Limite de requisições da API do Claude atingido. Tente de novo em instantes.") from exc
+        raise TranslationError("Limite de requisições da API do Claude atingido.", retryable=True) from exc
+    except anthropic.InternalServerError as exc:
+        raise TranslationError(f"Servidor do Claude com problema: {exc.message}", retryable=True) from exc
     except anthropic.APIStatusError as exc:
-        raise TranslationError(f"Erro na API do Claude: {exc.message}") from exc
+        # 529 (sobrecarga) também é temporário
+        raise TranslationError(f"Erro na API do Claude: {exc.message}", retryable=exc.status_code >= 500) from exc
     except anthropic.APIConnectionError as exc:
-        raise TranslationError("Sem conexão com a API do Claude.") from exc
+        raise TranslationError("Sem conexão com a API do Claude.", retryable=True) from exc
 
     if response.stop_reason == "refusal":
         raise TranslationError("O Claude recusou o pedido.")
     if response.stop_reason == "max_tokens":
         raise TranslationError("A resposta do Claude foi cortada (texto demais de uma vez).")
-    return next((block.text for block in response.content if block.type == "text"), "")
+    usage = Usage(
+        (response.usage.input_tokens or 0)
+        + (response.usage.cache_read_input_tokens or 0)
+        + (response.usage.cache_creation_input_tokens or 0),
+        response.usage.cache_read_input_tokens or 0,
+        response.usage.output_tokens or 0,
+    )
+    return next((block.text for block in response.content if block.type == "text"), ""), usage
 
 
 def translate_text(
     lines: list[Line], context: list[str], source: str, target: str, model: str, api_key: str, characters: list[Character] | None = None
-) -> list[Result]:
-    raw = structured(
+) -> tuple[list[Result], Usage]:
+    raw, usage = structured(
         api_key,
         model,
         llm_instructions(source, target, False, characters),
         [{"type": "text", "text": text_request(lines, context)}],
         response_schema(False),
     )
-    return parse_response(raw, lines)
+    return parse_response(raw, lines), usage
 
 
 def translate_image(
@@ -71,10 +81,10 @@ def translate_image(
     model: str,
     api_key: str,
     characters: list[Character] | None = None,
-) -> list[Result]:
+) -> tuple[list[Result], Usage]:
     numbers = ", ".join(str(line.id) for line in lines)
     context_text = "\n".join(context) or "(none)"
-    raw = structured(
+    raw, usage = structured(
         api_key,
         model,
         llm_instructions(source, target, True, characters),
@@ -87,4 +97,4 @@ def translate_image(
         ],
         response_schema(True),
     )
-    return parse_response(raw, lines)
+    return parse_response(raw, lines), usage

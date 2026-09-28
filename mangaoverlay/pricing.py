@@ -51,3 +51,8 @@ def format_cost(value: float | None) -> str:
     if value < 0.01:
         return "menos de US$ 0,01"
     return f"~US$ {value:.2f}".replace(".", ",")
+
+
+def thousands(value: int) -> str:
+    """123456 -> "123.456" (separador de milhar brasileiro)."""
+    return f"{value:,}".replace(",", ".")

@@ -266,7 +266,9 @@ class Pipeline:
         pending = readable
         key = self._db_key(config)
         if self._db is not None:
-            saved = self._db.find_translations(key, [text for _i, text in readable])
+            # Se o motor atual ainda não traduziu, aceita qualquer tradução já paga com IA (ex.: lote feito com
+            # outro modelo, ou leitura no modo visão/NLLB de uma obra traduzida em lote no modo texto)
+            saved = self._db.find_translations(key, [text for _i, text in readable], also_engines=("openai-text", "claude-text"))
             pending = []
             for index, text in readable:
                 translation = saved.get(normalize(text))
@@ -309,6 +311,14 @@ class Pipeline:
             readable = self._read(crops, list(range(len(regions))), config.source_lang)
         boxes = [(regions[i].text_box, text) for i, text in readable]
         return sorted(boxes, key=lambda item: _reading_order(item[0], image.height, config.source_lang))
+
+    def translate_offline(self, lines: list[Line], config: Config) -> list[Result]:
+        """NLLB na GPU para a tradução em lote (em segundo plano: cede a vez ao atalho)."""
+        with self._background():
+            self._prepare(config, lambda _msg: None)
+            if self._nllb is None:
+                self._nllb = translators.NllbTranslator(self._device)
+            return self._nllb.translate(lines, config.source_lang, config.target_lang)
 
     @contextmanager
     def _interactive(self):
@@ -356,11 +366,11 @@ class Pipeline:
         if engine in VISION_ENGINES:
             page = translators.marked_page(image, {line.id: regions[i].text_box for line, (i, _t) in zip(lines, lines_by_index)})
             if engine == "openai-vision":
-                out = llm_openai.translate_image(
+                out, _usage = llm_openai.translate_image(
                     page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters
                 )
             else:
-                out = llm_anthropic.translate_image(
+                out, _usage = llm_anthropic.translate_image(
                     page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters
                 )
         elif engine == "google":
@@ -371,11 +381,11 @@ class Pipeline:
                 self._nllb = translators.NllbTranslator(self._device)
             out = self._nllb.translate(lines, source, target)
         elif engine == "openai-text":
-            out = llm_openai.translate_text(
+            out, _usage = llm_openai.translate_text(
                 lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters
             )
         else:
-            out = llm_anthropic.translate_text(
+            out, _usage = llm_anthropic.translate_text(
                 lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters
             )
         return {lines_by_index[r.id - 1][0]: r for r in out}

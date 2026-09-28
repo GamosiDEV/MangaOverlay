@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QM
 
 from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot
 from .config import ENGINES, Config
+from .batch import BatchRunner, batch_key
 from .db import Database
 from .importer import Importer
 from .sources import discover
@@ -26,6 +27,7 @@ from .languages import AUTO, SOURCES, TARGETS, source_name, target_name
 from .pipeline import Pipeline
 from .platform_info import is_wayland
 from .render import base_font
+from .ui.batchdialog import BatchDialog, BatchWindow
 from .ui.characters import CharactersDialog
 from .ui.icon import app_icon
 from .ui.importwindow import ImportWindow
@@ -86,6 +88,13 @@ class MangaOverlayApp(QObject):
         self.importer.progress.connect(self._import_window.update_progress)
         self.importer.finished.connect(self._on_import_finished)
 
+        self.batch_runner = BatchRunner(self.db, self.pipeline, self)
+        self._batch_window = BatchWindow()
+        self._batch_window.setWindowIcon(app_icon())
+        self._batch_window.pause_requested.connect(self.batch_runner.pause)
+        self.batch_runner.progress.connect(self._batch_window.update_progress)
+        self.batch_runner.finished.connect(self._on_batch_finished)
+
         self._build_tray()
         self.status.connect(lambda message: self._notify(message, 5000))
 
@@ -95,6 +104,7 @@ class MangaOverlayApp(QObject):
 
         self._warm_up()
         self._resume_import(silent=True)
+        self._resume_batches(silent=True)
 
     def _warm_up(self) -> None:
         # Na fila de trabalho: um atalho apertado durante o carregamento só espera a vez
@@ -132,6 +142,9 @@ class MangaOverlayApp(QObject):
         menu.addSeparator()
         self._characters_action = menu.addAction("Personagens da obra…", self._open_characters)
         menu.addAction("Importar capítulos…", self._import_chapters)
+        self._batch_action = menu.addAction("Traduzir capítulos…", self._translate_chapters)
+        self._batch_resume_action = menu.addAction("", lambda: self._resume_batches(silent=False))
+        self._batch_progress_action = menu.addAction("Ver progresso da tradução em lote", self._batch_window.show)
         self._resume_action = menu.addAction("", lambda: self._resume_import(silent=False))
         self._import_progress_action = menu.addAction("Ver progresso da importação", self._import_window.show)
         menu.aboutToShow.connect(self._refresh_import_actions)
@@ -182,6 +195,12 @@ class MangaOverlayApp(QObject):
         self._resume_action.setText(f"Retomar importação ({pending} página(s) pendente(s))")
         self._resume_action.setVisible(pending > 0)
         self._import_progress_action.setVisible(running)
+        batch_running = self.batch_runner.running
+        resumable = 0 if batch_running else len(self._resumable_batches())
+        self._batch_resume_action.setText(f"Retomar tradução em lote ({resumable} lote(s))")
+        self._batch_resume_action.setVisible(resumable > 0)
+        self._batch_progress_action.setVisible(batch_running)
+        self._batch_action.setEnabled(self.config.current_work is not None)
 
     def _open_characters(self) -> None:
         work = self.db.work(self.config.current_work)
@@ -254,6 +273,66 @@ class MangaOverlayApp(QObject):
             self._notify(f"{skipped} capítulo(s) já tinham sido importados nesta obra e foram ignorados.", 6000)
         if added:
             self._resume_import(silent=False)
+
+    # --- tradução em lote ------------------------------------------------------
+
+    def _translate_chapters(self) -> None:
+        work = self.db.work(self.config.current_work)
+        if work is None:
+            return
+        if self.batch_runner.running:
+            self._batch_window.show()
+            self._notify("Já há uma tradução em lote em andamento; espere terminar ou pause antes de começar outra.", 5000)
+            return
+        if not self.db.chapters(work.id):
+            QMessageBox.information(
+                None, APP_DISPLAY_NAME, "Esta obra ainda não tem capítulos importados. Use “Importar capítulos…” primeiro."
+            )
+            return
+        dialog = BatchDialog(self.db, work, replace(self.config))
+        dialog.setWindowIcon(app_icon())
+        if dialog.exec() != BatchDialog.DialogCode.Accepted or dialog.estimate is None:
+            return
+        pages_per_block = dialog.block.value()
+        if pages_per_block != self.config.batch_pages_per_block:
+            self._update_config(batch_pages_per_block=pages_per_block)
+        key = batch_key(self.config, work.id, work.source_lang)
+        pages = self.db.chapter_pages(dialog.selected_chapters())
+        self.db.create_batch(work.id, key, pages_per_block, pages, dialog.estimate.cost)
+        self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}…")
+
+    def _resumable_batches(self):
+        """Lotes pausados e lotes concluídos com blocos que falharam."""
+        paused = self.db.batches(("pausado",))
+        with_failures = [b for b in self.db.batches(("concluido",)) if self.db.batch_summary(b.id).failed]
+        return paused + with_failures
+
+    def _resume_batches(self, silent: bool) -> None:
+        """Ao abrir o app (silent): continua os lotes que estavam ativos. Pelo menu: também os pausados e as falhas."""
+        if not silent:
+            for batch in self._resumable_batches():
+                self.db.retry_failed_requests(batch.id)
+                self.db.set_batch_state(batch.id, "ativo")
+        active = self.db.batches(("ativo",))
+        if not active:
+            return
+        if silent:
+            if self.batch_runner.start(self.config):
+                self._notify(f"Retomando a tradução em lote ({len(active)} lote(s)).", 5000)
+        else:
+            self._start_batches("Retomando a tradução em lote…")
+
+    def _start_batches(self, title: str) -> None:
+        if self.batch_runner.start(self.config):
+            self._batch_window.start(title)
+
+    def _on_batch_finished(self, outcome) -> None:
+        self._batch_window.show_outcome(outcome)
+        if not self._batch_window.isVisible():
+            if outcome.state == "concluido":
+                self._notify("Tradução em lote concluída.", 6000)
+            elif outcome.state == "pausado" and outcome.error:
+                self._notify(f"Tradução em lote pausada: {outcome.error}", 12000, warning=True)
 
     def _resume_import(self, silent: bool) -> None:
         """Processa as páginas pendentes. Ao abrir o app (silent), só avisa pela bandeja."""
@@ -490,7 +569,9 @@ class MangaOverlayApp(QObject):
         self.hide_translation()
         self.tray.hide()
         self.importer.stop()  # o que faltar fica pendente e é retomado na próxima vez
+        self.batch_runner.interrupt()  # idem: o lote continua ativo e volta ao abrir o app
         self.importer.wait(10)
+        self.batch_runner.wait(10)
         self._pool.waitForDone(5000)  # não fecha o banco no meio de uma gravação
         self.db.close()
         self._qapp.quit()
