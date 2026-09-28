@@ -10,6 +10,7 @@ from PIL import Image
 from . import credentials, llm_anthropic, llm_openai, translators
 from .colorize import Colorizer, find_page
 from .config import VISION_ENGINES, Config
+from .db import Database, TranslationKey, normalize
 from .detector import Box, Detector, Region
 from .languages import AUTO, looks_like
 from .ocr import OcrEngine
@@ -79,7 +80,10 @@ class _Cache:
 
 
 class Pipeline:
-    def __init__(self):
+    def __init__(self, db: Database | None = None):
+        # Sem banco (ex.: --image), as traduções ficam só na memória desta execução
+        self._db = db
+        self._work: int | None = None
         self._device: str | None = None
         self._detector: Detector | None = None
         self._ocr: OcrEngine | None = None
@@ -89,9 +93,13 @@ class Pipeline:
         # Falas das últimas telas: dão contexto de cena para os LLMs
         self._context: deque[str] = deque(maxlen=30)
 
-    def clear_cache(self) -> None:
+    def clear_cache(self, work_id: int | None = None, forget_saved: bool = False) -> int:
+        """Esvazia o cache em memória; com forget_saved, apaga também as traduções salvas da obra."""
         self._cache.clear()
         self._context.clear()
+        if forget_saved and self._db is not None:
+            return self._db.forget_translations(work_id)
+        return 0
 
     def _prepare(self, config: Config, status: Callable[[str], None]) -> None:
         import torch
@@ -108,8 +116,8 @@ class Pipeline:
     def warm_up(self, config: Config) -> None:
         """Carrega os modelos locais antes do primeiro atalho (na primeira vez eles são baixados)."""
         self._prepare(config, lambda _msg: None)
-        if config.engine not in VISION_ENGINES and config.source_lang != AUTO:
-            self._ocr.load(config.source_lang)
+        if config.source_lang != AUTO:
+            self._ocr.load(config.source_lang)  # também no modo visão: o texto lido é a chave do banco
         if config.engine == "local" and self._nllb is None:
             self._nllb = translators.NllbTranslator(self._device)
         if config.colorize and self._colorizer is None:
@@ -130,6 +138,10 @@ class Pipeline:
                 "Com OCR local, defina o idioma de origem no menu da bandeja."
             )
         self._prepare(config, status)
+        if config.current_work != self._work:
+            # Outra obra: as falas recentes da anterior não servem de contexto
+            self._work = config.current_work
+            self._context.clear()
         detection = self._detector.detect(image, config.include_free_text)
         result = ScreenResult(items=[], color_box=None, color_image=None)
 
@@ -158,7 +170,7 @@ class Pipeline:
         config: Config,
         status: Callable[[str], None],
     ) -> list[OverlayItem]:
-        key = (config.engine, config.openai_model, config.claude_model, config.source_lang, config.target_lang)
+        key = (config.current_work, config.engine, config.openai_model, config.claude_model, config.source_lang, config.target_lang)
         crops = [image.crop(r.text_box) for r in regions]
         signatures = [_dhash(c) for c in crops]
         results: dict[int, Result] = {}
@@ -176,7 +188,6 @@ class Pipeline:
                 if index in new:
                     results[index] = new[index]
                     self._cache.put(key, signatures[index], new[index])
-            self._context.extend(r.original for i, r in sorted(new.items()) if r.original)
 
         items = []
         for index, region in enumerate(regions):
@@ -206,18 +217,11 @@ class Pipeline:
         config: Config,
         status: Callable[[str], None],
     ) -> dict[int, Result]:
-        source, target, engine = config.source_lang, config.target_lang, config.engine
-        context = list(self._context)
-
-        if engine in VISION_ENGINES:
-            # Números a partir de 1, na ordem das regiões (é o que aparece na imagem enviada)
-            lines = [Line(n, "") for n in range(1, len(indices) + 1)]
-            page = translators.marked_page(image, {n: regions[i].text_box for n, i in zip(range(1, len(indices) + 1), indices)})
-            if engine == "openai-vision":
-                out = llm_openai.translate_image(page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI))
-            else:
-                out = llm_anthropic.translate_image(page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC))
-            return {indices[r.id - 1]: r for r in out}
+        """Tradução das regiões `indices`: banco primeiro (pelo texto lido), tradutor só para o que falta."""
+        source = config.source_lang
+        if source == AUTO:
+            # Sem idioma definido não há OCR local, logo nem chave para o banco: o LLM lê a imagem direto.
+            return self._call_translator(image, regions, [(i, "") for i in indices], config)
 
         if self._ocr is None:
             raise PipelineError("OCR não carregado.")
@@ -231,9 +235,51 @@ class Pipeline:
         ]
         if not readable:
             return {}
-        lines = [Line(n, text) for n, (_i, text) in enumerate(readable, start=1)]
 
-        if engine == "google":
+        results: dict[int, Result] = {}
+        pending = readable
+        key = self._db_key(config)
+        if self._db is not None:
+            saved = self._db.find_translations(key, [text for _i, text in readable])
+            pending = []
+            for index, text in readable:
+                translation = saved.get(normalize(text))
+                if translation is not None:
+                    results[index] = Result(0, text, translation)
+                else:
+                    pending.append((index, text))
+
+        if pending:
+            new = self._call_translator(image, regions, pending, config, status)
+            results.update(new)
+            local_text = dict(pending)
+            if self._db is not None:
+                # Gravado pelo texto do OCR local (no modo visão, o LLM pode transcrever um pouco diferente)
+                self._db.save_translations(key, [(local_text[i], r.translation) for i, r in new.items()])
+            self._context.extend(r.original for _i, r in sorted(new.items()) if r.original)
+        return results
+
+    def _call_translator(
+        self,
+        image: Image.Image,
+        regions: list[Region],
+        lines_by_index: list[tuple[int, str]],
+        config: Config,
+        status: Callable[[str], None] = lambda _msg: None,
+    ) -> dict[int, Result]:
+        """Chama o motor configurado para (índice da região, texto lido). Retorna índice -> resultado."""
+        source, target, engine = config.source_lang, config.target_lang, config.engine
+        context = list(self._context)
+        # Números a partir de 1 (no modo visão, são os que aparecem desenhados na imagem enviada)
+        lines = [Line(n, text) for n, (_i, text) in enumerate(lines_by_index, start=1)]
+
+        if engine in VISION_ENGINES:
+            page = translators.marked_page(image, {line.id: regions[i].text_box for line, (i, _t) in zip(lines, lines_by_index)})
+            if engine == "openai-vision":
+                out = llm_openai.translate_image(page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI))
+            else:
+                out = llm_anthropic.translate_image(page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC))
+        elif engine == "google":
             out = translators.translate_google(lines, source, target)
         elif engine == "local":
             if self._nllb is None:
@@ -244,7 +290,19 @@ class Pipeline:
             out = llm_openai.translate_text(lines, context, source, target, config.openai_model, self._key(credentials.OPENAI))
         else:
             out = llm_anthropic.translate_text(lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC))
-        return {readable[r.id - 1][0]: r for r in out}
+        return {lines_by_index[r.id - 1][0]: r for r in out}
+
+    @staticmethod
+    def _db_key(config: Config) -> TranslationKey:
+        if config.engine.startswith("openai"):
+            model = config.openai_model
+        elif config.engine.startswith("claude"):
+            model = config.claude_model
+        elif config.engine == "local":
+            model = translators.NLLB_ID
+        else:
+            model = config.engine
+        return TranslationKey(config.current_work, config.source_lang, config.target_lang, config.engine, model)
 
     @staticmethod
     def _key(name: str) -> str:

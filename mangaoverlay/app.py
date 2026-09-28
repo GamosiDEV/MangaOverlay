@@ -12,10 +12,11 @@ from dataclasses import replace
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot
 from .config import ENGINES, Config
+from .db import Database
 from .hotkeys import HotkeyManager
 from .languages import AUTO, SOURCES, TARGETS, source_name, target_name
 from .pipeline import Pipeline
@@ -55,7 +56,10 @@ class MangaOverlayApp(QObject):
         super().__init__()
         self._qapp = qapp
         self.config = Config.load()
-        self.pipeline = Pipeline()
+        self.db = Database()
+        if self.db.work(self.config.current_work) is None:
+            self.config.current_work = None  # obra apagada ou banco novo
+        self.pipeline = Pipeline(self.db)
         # Uma tarefa por vez: os modelos na GPU não são usados em paralelo
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
@@ -100,6 +104,8 @@ class MangaOverlayApp(QObject):
         self._colorize_toggle.toggled.connect(lambda on: on != self.config.colorize and self._update_config(colorize=on))
         menu.addSeparator()
 
+        self._work_menu = menu.addMenu("")
+        self._work_menu.aboutToShow.connect(self._fill_work_menu)
         self._source_menu = menu.addMenu("")
         self._source_group = self._choice_actions(self._source_menu, [(source_name(c), c) for c in [*SOURCES, AUTO]], "source_lang")
         self._target_menu = menu.addMenu("")
@@ -108,7 +114,7 @@ class MangaOverlayApp(QObject):
         self._engine_group = self._choice_actions(self._engine_menu, [(label, key) for key, label in ENGINES.items()], "engine")
 
         menu.addSeparator()
-        menu.addAction("Esquecer traduções guardadas", self._clear_cache)
+        menu.addAction("Esquecer as traduções desta obra…", self._forget_translations)
         menu.addAction("Configurações…", self.open_settings)
         menu.addAction("Sair", self.quit)
 
@@ -135,6 +141,8 @@ class MangaOverlayApp(QObject):
         self._colorize_action.setText(f"Colorir a tela{hint(c.hotkey_colorize)}")
         self._hide_action.setText(f"Esconder{hint(c.hotkey_hide)}")
         self._colorize_toggle.setChecked(c.colorize)
+        work = self.db.work(c.current_work)
+        self._work_menu.setTitle(f"Obra: {work.name if work else 'nenhuma'}")
         self._source_menu.setTitle(f"Origem: {source_name(c.source_lang)}")
         self._target_menu.setTitle(f"Destino: {target_name(c.target_lang)}")
         self._engine_menu.setTitle(f"Motor: {ENGINES[c.engine]}")
@@ -145,6 +153,51 @@ class MangaOverlayApp(QObject):
         ):
             for action in group.actions():
                 action.setChecked(action.data() == value)
+
+    def _fill_work_menu(self) -> None:
+        """Lista montada na hora de abrir: sempre reflete o banco."""
+        menu = self._work_menu
+        menu.clear()
+        group = QActionGroup(menu)
+        for work in [None, *self.db.works()]:
+            action = menu.addAction(work.name if work else "Nenhuma (traduções soltas)")
+            action.setCheckable(True)
+            action.setChecked((work.id if work else None) == self.config.current_work)
+            action.triggered.connect(lambda _checked=False, w=work: self._select_work(w))
+            group.addAction(action)
+            if work is None:
+                menu.addSeparator()
+        menu.addSeparator()
+        menu.addAction("Nova obra…", self._new_work)
+
+    def _select_work(self, work) -> None:
+        if work is None:
+            self._update_config(current_work=None)
+        else:
+            # Cada obra lembra o próprio idioma de origem
+            self._update_config(current_work=work.id, source_lang=work.source_lang)
+
+    def _new_work(self) -> None:
+        name, ok = QInputDialog.getText(None, APP_DISPLAY_NAME, "Nome do mangá que você vai ler:")
+        if not ok or not name.strip():
+            return
+        work = self.db.create_work(name, self.config.source_lang)
+        self._select_work(work)
+        self._notify(f"Lendo agora: {work.name} ({source_name(work.source_lang)}).", 4000)
+
+    def _forget_translations(self) -> None:
+        work = self.db.work(self.config.current_work)
+        label = f"da obra “{work.name}”" if work else "sem obra"
+        count = self.db.count_translations(self.config.current_work)
+        answer = QMessageBox.question(
+            None,
+            APP_DISPLAY_NAME,
+            f"Apagar as {count} traduções salvas {label}?\n\nElas serão feitas (e pagas, se o motor for pago) de novo quando você voltar a essas páginas.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # Na fila de trabalho, para não apagar no meio de uma tradução
+        self._pool.start(_Job(self.pipeline.clear_cache, self.config.current_work, True))
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -157,6 +210,9 @@ class MangaOverlayApp(QObject):
     # --- configurações --------------------------------------------------------
 
     def _update_config(self, **changes) -> None:
+        if "source_lang" in changes and self.config.current_work is not None and "current_work" not in changes:
+            # Mudou o idioma com uma obra aberta: a obra passa a lembrar o novo idioma
+            self.db.set_work_language(self.config.current_work, changes["source_lang"])
         self.config = replace(self.config, **changes)
         self.config.save()
         self._refresh_menu()
@@ -166,10 +222,6 @@ class MangaOverlayApp(QObject):
         warning = self.hotkeys.apply(self.config.hotkeys)
         if warning:
             self._notify(warning, 15000, warning=True)
-
-    def _clear_cache(self) -> None:
-        # Roda na fila de trabalho para não mexer no cache durante uma tradução
-        self._pool.start(_Job(self.pipeline.clear_cache))
 
     def open_settings(self) -> None:
         if self._settings_open:
@@ -195,6 +247,8 @@ class MangaOverlayApp(QObject):
             except Exception as exc:  # erros variados do backend do chaveiro
                 QMessageBox.warning(None, APP_DISPLAY_NAME, f"Não foi possível salvar a chave no chaveiro do sistema: {exc}")
                 break
+        if new_config.source_lang != self.config.source_lang and new_config.current_work is not None:
+            self.db.set_work_language(new_config.current_work, new_config.source_lang)
         self.config = new_config
         self.config.save()
         self._refresh_menu()
@@ -318,6 +372,8 @@ class MangaOverlayApp(QObject):
         self._ipc.close()
         self.hide_translation()
         self.tray.hide()
+        self._pool.waitForDone(5000)  # não fecha o banco no meio de uma gravação
+        self.db.close()
         self._qapp.quit()
 
 

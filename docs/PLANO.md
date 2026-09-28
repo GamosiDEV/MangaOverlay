@@ -23,7 +23,7 @@ Plano das próximas funcionalidades do MangaOverlay, decididas em 28/09/2026. Ca
 
 Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
-- [ ] Banco SQLite em `~/.local/share/MangaOverlay/mangaoverlay.db`, com as tabelas:
+- [x] Banco SQLite em `~/.local/share/MangaOverlay/mangaoverlay.db`, versionado: cada fase acrescenta as próprias tabelas por migração automática (a Fase 1 criou `obras` e `traducoes`). Tabelas previstas:
   - `obras`: nome, idioma de origem, data de criação.
   - `paginas`: obra, capítulo, número, origem (arquivo ou captura), assinatura da imagem.
   - `regioes`: página, posição do balão, texto original lido pelo OCR.
@@ -31,11 +31,12 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
   - `personagens`: obra, nome original (opcional), nome na tradução, gênero, jeito de falar, notas.
   - `memoria`: obra, glossário e resumo da história.
   - `lotes` e `requisicoes`: estado de cada envio (pendente, enviada, concluída, falhou), tentativas, id do Batch.
-- [ ] Menu da bandeja: "Obra atual" (escolher, criar nova, "nenhuma").
-- [ ] O cache de traduções em memória passa a ler e gravar no banco.
-- [ ] Busca de tradução pelo **texto lido pelo OCR** (e não só pela aparência do recorte), para reconhecer a página mesmo com zoom diferente.
+- [x] Menu da bandeja: "Obra atual" (escolher, criar nova, "nenhuma"). Cada obra lembra o próprio idioma de origem.
+- [x] O cache de traduções em memória passa a ler e gravar no banco.
+- [x] Busca de tradução pelo **texto lido pelo OCR** (e não só pela aparência do recorte), para reconhecer a página mesmo com zoom diferente.
+- [x] "Esquecer as traduções desta obra…", com confirmação.
 
-**Pronto quando:** traduzir uma página, fechar e reabrir o app e apertar o atalho na mesma página mostra a tradução na hora, sem chamada à API.
+**Pronto quando:** traduzir uma página, fechar e reabrir o app e apertar o atalho na mesma página mostra a tradução na hora, sem chamada à API. ✅ Verificado (também com zoom de 85% e 120% e página em outra posição).
 
 ### Fase 2: Importação de capítulos
 

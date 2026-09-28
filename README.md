@@ -17,7 +17,7 @@ Fica em segundo plano, na bandeja. A sobreposição não recebe cliques, então 
 1. **Captura:** um print de cada monitor (no GNOME/Wayland, pelo portal do sistema).
 2. **Detecção:** o modelo [comic-text-and-bubble-detector](https://huggingface.co/ogkalu/comic-text-and-bubble-detector) (RT-DETR-v2, Apache-2.0) encontra balões e textos. Só vale o texto dentro de um balão com alta confiança, para não traduzir menus e botões.
 3. **Leitura (OCR):** [manga-ocr](https://huggingface.co/kha-white/manga-ocr-base) para japonês, que lê texto vertical; EasyOCR para coreano, chinês e inglês.
-4. **Tradução:** pelo motor escolhido (veja abaixo). Traduções já feitas ficam guardadas, então voltar a uma página é instantâneo.
+4. **Tradução:** primeiro o app procura no banco local uma tradução já feita para o mesmo texto; só o que falta vai para o motor escolhido (veja abaixo). A busca é pelo texto lido, então a página é reconhecida mesmo com outro zoom ou em outra posição da tela.
 5. **Desenho:** cobre o texto original sem apagar o contorno do balão e encaixa a tradução no maior tamanho de fonte que couber.
 
 ### Colorização
@@ -29,6 +29,12 @@ Fica em segundo plano, na bandeja. A sobreposição não recebe cliques, então 
 As cores são uma interpretação do modelo: podem variar de uma página para outra (o cabelo de um personagem pode mudar de cor) e ficam mais fracas em cenários complexos. O repositório original do modelo não declara licença; o espelho usado (`ifritraen/manga-colorization-v2-fp32`) declara Apache-2.0. Trate como uso pessoal.
 
 Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s na RTX 5050 com o tradutor offline. O primeiro uso baixa cerca de 3,6 GB de modelos.
+
+## Obras e traduções salvas
+
+No menu da bandeja, **Obra** escolhe o mangá que você está lendo (ou cria um novo). Cada obra guarda as próprias traduções e lembra o idioma de origem. Toda tradução fica salva em disco: voltar a uma página, mesmo depois de fechar o app, mostra a tradução na hora e não gera nova cobrança na API. Com "Nenhuma", as traduções também ficam salvas, sem obra associada.
+
+"Esquecer as traduções desta obra…" apaga as traduções salvas da obra atual (pede confirmação).
 
 ## Motores
 
@@ -84,6 +90,7 @@ python main.py --image pagina.png [--out saida.png] [--engine local] [--source j
 ## Arquivos
 
 - Configurações: `~/.config/MangaOverlay/config.json`
+- Obras e traduções salvas: `~/.local/share/MangaOverlay/mangaoverlay.db` (SQLite)
 - Modelos: `~/.cache/huggingface` e `~/.cache/MangaOverlay/easyocr`
 
 ## Licença

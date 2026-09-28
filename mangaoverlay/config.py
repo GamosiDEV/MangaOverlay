@@ -33,6 +33,8 @@ class Config:
     openai_model: str = "gpt-4.1-mini"
     claude_model: str = "claude-opus-5"
     source_lang: str = "ja"
+    # Obra que está sendo lida (id no banco); None = sem obra
+    current_work: int | None = None
     target_lang: str = "pt"
     # Traduz também textos fora dos balões (narração, onomatopeias). Desligado por padrão porque
     # o detector confunde esses textos com os de menus e sites.
