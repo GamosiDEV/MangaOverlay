@@ -1,0 +1,112 @@
+"""OCR local de cada texto detectado.
+
+- Japonês: manga-ocr (kha-white/manga-ocr-base, Apache-2.0), que lê texto vertical e estilizado de mangá.
+- Coreano, chinês e inglês: EasyOCR.
+"""
+
+import re
+
+import numpy as np
+from PIL import Image
+
+from .config import CACHE_DIR
+
+MANGA_OCR_ID = "kha-white/manga-ocr-base"
+_EASYOCR_LANGS = {"ko": ["ko", "en"], "zh-CN": ["ch_sim", "en"], "zh-TW": ["ch_tra", "en"], "en": ["en"]}
+
+
+class _MangaOcr:
+    """Mesma inferência e pós-processamento do pacote manga-ocr, sem as dependências extras dele."""
+
+    def __init__(self, device: str):
+        import torch
+        from transformers import BertTokenizer, ViTImageProcessor, VisionEncoderDecoderModel
+
+        self._torch = torch
+        self.device = device
+        self.processor = ViTImageProcessor.from_pretrained(MANGA_OCR_ID)
+        # Só decodificamos: o vocabulário basta (o BertJapaneseTokenizer original exigiria o MeCab)
+        self.tokenizer = BertTokenizer.from_pretrained(MANGA_OCR_ID)
+        self.model = VisionEncoderDecoderModel.from_pretrained(MANGA_OCR_ID).to(device).eval()
+
+    def read_batch(self, images: list[Image.Image]) -> list[tuple[str, float]]:
+        """(texto, confiança média dos caracteres) de cada imagem."""
+        if not images:
+            return []
+        prepared = [img.convert("L").convert("RGB") for img in images]
+        pixels = self.processor(prepared, return_tensors="pt").pixel_values.to(self.device)
+        with self._torch.inference_mode():
+            out = self.model.generate(pixels, max_length=300, output_scores=True, return_dict_in_generate=True)
+        texts = self.tokenizer.batch_decode(out.sequences, skip_special_tokens=True)
+        if getattr(out, "sequences_scores", None) is not None:
+            # Beam search (padrão do modelo): log-probabilidade média por caractere de cada leitura
+            confidences = out.sequences_scores.exp().tolist()
+        else:
+            log_probs = self.model.compute_transition_scores(out.sequences, out.scores, normalize_logits=True)
+            valid = out.sequences[:, 1:] != self.tokenizer.pad_token_id
+            confidences = [float(row[mask].exp().mean()) if bool(mask.any()) else 0.0 for row, mask in zip(log_probs, valid)]
+        results = [(self._post_process(text), float(conf)) for text, conf in zip(texts, confidences)]
+        return results
+
+    @staticmethod
+    def _post_process(text: str) -> str:
+        text = "".join(text.split())
+        text = text.replace("…", "...")
+        return re.sub("[・.]{2,}", lambda m: (m.end() - m.start()) * ".", text)
+
+
+class OcrEngine:
+    def __init__(self, device: str):
+        self.device = device
+        self._manga_ocr: _MangaOcr | None = None
+        self._easyocr: dict[str, object] = {}
+
+    def load(self, source: str):
+        """Carrega (uma vez) o OCR do idioma: manga-ocr para japonês, EasyOCR para os outros."""
+        if source not in _EASYOCR_LANGS:
+            if self._manga_ocr is None:
+                self._manga_ocr = _MangaOcr(self.device)
+            return self._manga_ocr
+        reader = self._easyocr.get(source)
+        if reader is None:
+            import easyocr
+
+            storage = CACHE_DIR / "easyocr"
+            storage.mkdir(parents=True, exist_ok=True)
+            reader = easyocr.Reader(
+                _EASYOCR_LANGS[source],
+                gpu=self.device.startswith("cuda"),
+                model_storage_directory=str(storage),
+                verbose=False,
+            )
+            self._easyocr[source] = reader
+        return reader
+
+    def is_latin(self, crop: Image.Image) -> bool:
+        """O recorte tem texto latino legível? O manga-ocr "inventa" japonês a partir de qualquer texto,
+        então botões e legendas em português virariam falas; o EasyOCR em inglês desmascara esses casos."""
+        text, confidence = self._read_easyocr(crop, "en")
+        return confidence >= 0.5 and len(re.findall(r"[A-Za-zÀ-ÿ]", text)) >= 4
+
+    def read(self, crops: list[Image.Image], source: str) -> list[tuple[str, float]]:
+        """(texto, confiança de 0 a 1) de cada recorte."""
+        if source in _EASYOCR_LANGS:
+            return [self._read_easyocr(crop, source) for crop in crops]
+        return self.load(source).read_batch(crops)
+
+    def _read_easyocr(self, crop: Image.Image, source: str) -> tuple[str, float]:
+        reader = self.load(source)
+
+        # Textos pequenos são lidos melhor ampliados
+        if crop.height < 64:
+            factor = 64 / crop.height
+            crop = crop.resize((round(crop.width * factor), 64), Image.Resampling.LANCZOS)
+        lines = reader.readtext(np.asarray(crop.convert("RGB")), detail=1, paragraph=False)
+        # Ordem de leitura: de cima para baixo, da esquerda para a direita
+        lines = [(box, text, conf) for box, text, conf in lines if conf >= 0.2 and text.strip()]
+        lines.sort(key=lambda item: (round(min(p[1] for p in item[0]) / 12), min(p[0] for p in item[0])))
+        if not lines:
+            return "", 0.0
+        separator = "" if source.startswith("zh") else " "
+        confidence = sum(conf for _box, _text, conf in lines) / len(lines)
+        return separator.join(text.strip() for _box, text, _conf in lines), float(confidence)

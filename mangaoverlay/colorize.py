@@ -1,0 +1,136 @@
+"""Versão colorida da página, sem alterar o conteúdo.
+
+O modelo (manga-colorization-v2, exportado em ONNX e convertido para PyTorch) roda numa resolução
+reduzida; da saída dele só aproveitamos a cor. A luminância vem da captura original em resolução
+total, então traço, retículas e texto continuam exatamente como estavam.
+
+Origem do modelo: github.com/qweasdd/manga-colorization-v2. O repositório original não declara
+licença; o espelho usado aqui (ifritraen/manga-colorization-v2-fp32) declara Apache-2.0.
+Trate como uso pessoal.
+"""
+
+import numpy as np
+from PIL import Image
+
+from .detector import Box
+
+MODEL_REPO = "ifritraen/manga-colorization-v2-fp32"
+MODEL_FILE = "manga_colorization_v2_fp32.onnx"
+# Largura (páginas em pé) ou altura/1,5 (páginas deitadas) em que o modelo roda, como no original
+MODEL_SIZE = 576
+
+
+class Colorizer:
+    def __init__(self, device: str):
+        import onnx
+        import torch
+        from huggingface_hub import hf_hub_download
+        from onnx2torch import convert
+
+        self._torch = torch
+        self.device = device
+        path = hf_hub_download(MODEL_REPO, MODEL_FILE)
+        self.model = convert(onnx.load(path)).to(device).eval()
+
+    def colorize(self, page: Image.Image) -> Image.Image:
+        """Mesma dimensão da entrada; só a cor muda."""
+        torch = self._torch
+        gray = page.convert("L")
+        width, height = gray.size
+        if height >= width:
+            size = (MODEL_SIZE, max(32, round(height * MODEL_SIZE / width)))
+        else:
+            size = (max(32, round(width * MODEL_SIZE * 1.5 / height)), round(MODEL_SIZE * 1.5))
+        small = np.asarray(gray.resize(size, Image.Resampling.BOX), dtype=np.float32) / 255
+        # Dimensões múltiplas de 32, completando com branco (como o original)
+        pad_h, pad_w = -small.shape[0] % 32, -small.shape[1] % 32
+        small = np.pad(small, ((0, pad_h), (0, pad_w)), constant_values=1.0)
+
+        x = torch.zeros(1, 5, *small.shape, device=self.device)  # canais 1-4: dicas de cor (nenhuma)
+        x[0, 0] = torch.from_numpy(small).to(self.device)
+        with torch.inference_mode():
+            rgb = self.model(x)[0].clamp(0, 1)
+        rgb = rgb[:, : size[1], : size[0]].permute(1, 2, 0).mul(255).byte().cpu().numpy()
+
+        # Cor do modelo (Cb, Cr ampliados) + luminância original em resolução total
+        _, cb, cr = Image.fromarray(rgb).convert("YCbCr").split()
+        cb = cb.resize((width, height), Image.Resampling.BICUBIC)
+        cr = cr.resize((width, height), Image.Resampling.BICUBIC)
+        return Image.merge("YCbCr", (gray, cb, cr)).convert("RGB")
+
+
+def _boundary(line: np.ndarray, saturation: np.ndarray) -> tuple[bool, bool]:
+    """(tem cor de interface, é uma faixa uniforme e não branca) para uma linha/coluna da imagem."""
+    colored = float((saturation > 40).mean()) > 0.02
+    uniform = float(line.std()) < 5 and float(line.mean()) < 180
+    return colored, uniform
+
+
+def find_page(image: Image.Image, bubbles: list[Box]) -> Box | None:
+    """Retângulo da página de mangá na tela, expandido a partir dos balões até a borda da página.
+
+    Para numa faixa uniforme escura/cinza (fundo do leitor) de 12 px ou mais, ou em pixels coloridos
+    (interface do navegador, outras janelas). Os vãos brancos entre quadros não interrompem.
+    """
+    if not bubbles:
+        return None
+    scale = 2  # trabalha em meia resolução
+    rgb = np.asarray(image.convert("RGB"))[::scale, ::scale].astype(np.int16)
+    gray = rgb.mean(axis=2)
+    saturation = rgb.max(axis=2) - rgb.min(axis=2)
+    h, w = gray.shape
+    x0 = max(0, min(b[0] for b in bubbles) // scale)
+    y0 = max(0, min(b[1] for b in bubbles) // scale)
+    x1 = min(w, max(b[2] for b in bubbles) // scale)
+    y1 = min(h, max(b[3] for b in bubbles) // scale)
+    run = 12 // scale
+
+    def advance(side: str) -> bool:
+        """Tenta avançar um lado; retorna False se chegou na borda da página."""
+        nonlocal x0, y0, x1, y1
+        # Olha `run` linhas adiante para distinguir o fundo do leitor de um detalhe uniforme da página
+        probe = []
+        for step in range(run):
+            if side == "left":
+                x = x0 - 1 - step
+                if x < 0:
+                    break
+                probe.append((gray[y0:y1, x], saturation[y0:y1, x]))
+            elif side == "right":
+                x = x1 + step
+                if x >= w:
+                    break
+                probe.append((gray[y0:y1, x], saturation[y0:y1, x]))
+            elif side == "top":
+                y = y0 - 1 - step
+                if y < 0:
+                    break
+                probe.append((gray[y, x0:x1], saturation[y, x0:x1]))
+            else:
+                y = y1 + step
+                if y >= h:
+                    break
+                probe.append((gray[y, x0:x1], saturation[y, x0:x1]))
+        if not probe:
+            return False
+        colored, uniform = _boundary(*probe[0])
+        if colored:
+            return False
+        if uniform and len(probe) == run and all(_boundary(*p)[1] for p in probe):
+            return False
+        if side == "left":
+            x0 -= 1
+        elif side == "right":
+            x1 += 1
+        elif side == "top":
+            y0 -= 1
+        else:
+            y1 += 1
+        return True
+
+    active = {"left", "right", "top", "bottom"}
+    while active:
+        for side in list(active):
+            if not advance(side):
+                active.discard(side)
+    return x0 * scale, y0 * scale, min(image.width, x1 * scale), min(image.height, y1 * scale)

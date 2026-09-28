@@ -1,0 +1,177 @@
+"""Tradução em lote dos textos de uma tela.
+
+Os motores com LLM ficam em llm_openai.py e llm_anthropic.py; aqui estão o Google gratuito,
+o NLLB offline e o que é comum aos LLMs (instruções e formato das respostas).
+"""
+
+import io
+import json
+from dataclasses import dataclass
+
+from PIL import Image, ImageDraw, ImageFont
+
+from .languages import AUTO, SOURCES, TARGETS, source_english, target_english
+
+
+class TranslationError(Exception):
+    pass
+
+
+@dataclass
+class Line:
+    id: int
+    text: str  # vazio no modo visão (o LLM lê a imagem)
+
+
+@dataclass
+class Result:
+    id: int
+    original: str
+    translation: str
+
+
+# --- Google Tradutor gratuito -------------------------------------------------------
+
+_GOOGLE_CODES = {"zh-CN": "zh-CN", "zh-TW": "zh-TW", AUTO: "auto"}
+
+
+def translate_google(lines: list[Line], source: str, target: str) -> list[Result]:
+    from deep_translator import GoogleTranslator
+    from deep_translator.exceptions import TooManyRequests
+
+    translator = GoogleTranslator(source=_GOOGLE_CODES.get(source, source), target=target)
+    texts = [line.text.replace("\n", " ") for line in lines]
+    try:
+        # Uma requisição só para a tela inteira; se o Google juntar ou quebrar linhas, traduz uma a uma.
+        joined = translator.translate("\n".join(texts)) or ""
+        parts = joined.split("\n")
+        if len(parts) != len(texts):
+            parts = [translator.translate(text) or "" for text in texts]
+    except TooManyRequests as exc:
+        raise TranslationError(
+            "O Google gratuito bloqueou temporariamente as requisições da sua rede (erro 429). "
+            "Tente mais tarde ou troque o motor no menu da bandeja."
+        ) from exc
+    except Exception as exc:  # deep-translator repassa erros próprios e de rede/HTTP variados
+        raise TranslationError(f"Erro no Google Tradutor: {exc}") from exc
+    return [Result(line.id, line.text, part.strip()) for line, part in zip(lines, parts)]
+
+
+# --- NLLB (offline, na GPU) -----------------------------------------------------------
+
+NLLB_ID = "facebook/nllb-200-distilled-600M"  # licença CC-BY-NC 4.0: uso pessoal/não comercial
+
+
+class NllbTranslator:
+    def __init__(self, device: str):
+        import torch
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        self._torch = torch
+        self.device = device
+        self.tokenizer = AutoTokenizer.from_pretrained(NLLB_ID)
+        dtype = torch.float16 if device.startswith("cuda") else torch.float32
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(NLLB_ID, dtype=dtype).to(device).eval()
+
+    def translate(self, lines: list[Line], source: str, target: str) -> list[Result]:
+        if source not in SOURCES:
+            raise TranslationError("A tradução offline precisa do idioma de origem definido (não funciona com 'Detectar').")
+        self.tokenizer.src_lang = SOURCES[source][2]
+        inputs = self.tokenizer([line.text for line in lines], return_tensors="pt", padding=True).to(self.device)
+        target_token = self.tokenizer.convert_tokens_to_ids(TARGETS[target][2])
+        with self._torch.inference_mode():
+            tokens = self.model.generate(**inputs, forced_bos_token_id=target_token, max_new_tokens=256)
+        outputs = self.tokenizer.batch_decode(tokens, skip_special_tokens=True)
+        return [Result(line.id, line.text, text.strip()) for line, text in zip(lines, outputs)]
+
+
+# --- Comum aos LLMs -------------------------------------------------------------------
+
+
+def _source_clause(source: str) -> str:
+    if source == AUTO:
+        return "The source language may be Japanese, Korean, Chinese or English; detect it"
+    return f"The source language is {source_english(source)}"
+
+
+def llm_instructions(source: str, target: str, vision: bool) -> str:
+    task = (
+        "The user sends a screenshot of a comic page. Each text to translate is marked with a red box and its "
+        "number. For every numbered box, transcribe the original text inside it and translate it."
+        if vision
+        else "The user sends a JSON object with the numbered texts of a comic page, read by OCR "
+        "(which may contain small reading errors: infer the intended text)."
+    )
+    return (
+        "You translate manga, manhwa, manhua and comics for a reader who does not know the original language. "
+        f"{task} {_source_clause(source)}. Translate into natural, colloquial {target_english(target)}, as a "
+        "professional scanlation would: keep each character's tone, keep honorifics such as -san and -kun, and "
+        "turn sound effects into equivalent onomatopoeia. Keep each translation short, because it has to fit in "
+        "the original speech bubble. The texts are in reading order and belong to the same scene; "
+        "the optional context holds the lines of the previous pages. "
+        "Return one item per number, with an empty translation if a box has no readable text."
+    )
+
+
+def response_schema(vision: bool) -> dict:
+    properties = {"id": {"type": "integer"}, "translation": {"type": "string"}}
+    if vision:
+        properties["original"] = {"type": "string"}
+    return {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(properties),
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+
+
+def text_request(lines: list[Line], context: list[str]) -> str:
+    payload = {"context": context, "texts": [{"id": line.id, "text": line.text} for line in lines]}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def parse_response(raw: str, lines: list[Line]) -> list[Result]:
+    try:
+        items = json.loads(raw)["items"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise TranslationError(f"Resposta inesperada do modelo: {raw[:200]}") from exc
+    by_id = {line.id: line for line in lines}
+    results = []
+    for item in items:
+        line = by_id.get(item.get("id"))
+        if line is None:
+            continue
+        original = item.get("original") or line.text
+        results.append(Result(line.id, str(original), str(item.get("translation", "")).strip()))
+    return results
+
+
+def marked_page(image: Image.Image, boxes: dict[int, tuple[int, int, int, int]], max_side: int = 1800) -> bytes:
+    """Imagem JPEG da tela com uma caixa vermelha numerada em cada texto (para os LLMs com visão)."""
+    scale = min(1.0, max_side / max(image.size))
+    page = image.convert("RGB")
+    if scale < 1:
+        page = page.resize((round(page.width * scale), round(page.height * scale)), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(page)
+    font = ImageFont.load_default(size=max(14, round(18 * scale)))
+    for number, (x0, y0, x1, y1) in boxes.items():
+        box = [round(v * scale) for v in (x0, y0, x1, y1)]
+        draw.rectangle(box, outline=(230, 0, 0), width=3)
+        label = str(number)
+        left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+        lx, ly = max(0, box[0] - (right - left) - 6), max(0, box[1])
+        draw.rectangle([lx, ly, lx + (right - left) + 6, ly + (bottom - top) + 6], fill=(230, 0, 0))
+        draw.text((lx + 3 - left, ly + 3 - top), label, fill="white", font=font)
+    buffer = io.BytesIO()
+    page.save(buffer, format="JPEG", quality=88)
+    return buffer.getvalue()
