@@ -348,15 +348,21 @@ class Pipeline:
         """Chama o motor configurado para (índice da região, texto lido). Retorna índice -> resultado."""
         source, target, engine = config.source_lang, config.target_lang, config.engine
         context = list(self._context)
+        # Lista de personagens da obra: nomes e gênero consistentes (só os motores com LLM a usam)
+        characters = self._db.characters(config.current_work) if self._db is not None else []
         # Números a partir de 1 (no modo visão, são os que aparecem desenhados na imagem enviada)
         lines = [Line(n, text) for n, (_i, text) in enumerate(lines_by_index, start=1)]
 
         if engine in VISION_ENGINES:
             page = translators.marked_page(image, {line.id: regions[i].text_box for line, (i, _t) in zip(lines, lines_by_index)})
             if engine == "openai-vision":
-                out = llm_openai.translate_image(page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI))
+                out = llm_openai.translate_image(
+                    page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters
+                )
             else:
-                out = llm_anthropic.translate_image(page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC))
+                out = llm_anthropic.translate_image(
+                    page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters
+                )
         elif engine == "google":
             out = translators.translate_google(lines, source, target)
         elif engine == "local":
@@ -365,9 +371,13 @@ class Pipeline:
                 self._nllb = translators.NllbTranslator(self._device)
             out = self._nllb.translate(lines, source, target)
         elif engine == "openai-text":
-            out = llm_openai.translate_text(lines, context, source, target, config.openai_model, self._key(credentials.OPENAI))
+            out = llm_openai.translate_text(
+                lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters
+            )
         else:
-            out = llm_anthropic.translate_text(lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC))
+            out = llm_anthropic.translate_text(
+                lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters
+            )
         return {lines_by_index[r.id - 1][0]: r for r in out}
 
     @staticmethod

@@ -25,6 +25,9 @@ ENGINES = {
 VISION_ENGINES = {"openai-vision", "claude-vision"}
 OPENAI_MODELS = ["gpt-4.1-mini", "gpt-4.1", "gpt-5-mini", "gpt-5"]
 CLAUDE_MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+# Modelos baratos para o levantamento completo de nomes (tarefa simples, muito texto de entrada)
+NAMES_MODELS_OPENAI = ["gpt-5.4-nano", "gpt-5-mini", "gpt-4.1-mini"]
+NAMES_MODELS_CLAUDE = ["claude-haiku-4-5", "claude-sonnet-5"]
 
 
 @dataclass
@@ -45,6 +48,11 @@ class Config:
     hotkey_translate: str = "Ctrl+Alt+M"
     hotkey_colorize: str = "Ctrl+Alt+C"
     hotkey_hide: str = "Ctrl+Alt+N"
+    # Levantamento de nomes: o rápido usa o modelo principal nos primeiros capítulos ainda não analisados;
+    # o completo usa estes modelos baratos em todos
+    names_quick_chapters: int = 3
+    names_model_openai: str = "gpt-5.4-nano"
+    names_model_claude: str = "claude-haiku-4-5"
     # Usa a GPU (CUDA) para os modelos locais, se houver
     use_gpu: bool = True
 

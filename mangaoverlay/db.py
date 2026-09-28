@@ -76,6 +76,20 @@ _MIGRATIONS = [
     );
     CREATE INDEX regioes_pagina ON regioes (pagina_id);
     """,
+    # 3: lista de personagens por obra e marca dos capítulos cujos nomes já foram levantados
+    """
+    CREATE TABLE personagens (
+        id INTEGER PRIMARY KEY,
+        obra_id INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+        nome TEXT NOT NULL,
+        nome_original TEXT NOT NULL DEFAULT '',
+        genero TEXT NOT NULL DEFAULT '',
+        jeito_de_falar TEXT NOT NULL DEFAULT '',
+        notas TEXT NOT NULL DEFAULT '',
+        UNIQUE (obra_id, nome COLLATE NOCASE)
+    );
+    ALTER TABLE capitulos ADD COLUMN nomes_levantados INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -107,6 +121,22 @@ class ChapterSummary:
     read: int
     errors: int
     texts: int
+
+
+@dataclass(frozen=True)
+class Character:
+    name: str  # como aparece na tradução (obrigatório)
+    original: str = ""  # como aparece no original (opcional)
+    gender: str = ""  # "masculino", "feminino", "outro" ou vazio
+    speech: str = ""  # jeito de falar
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class ChapterTexts:
+    id: int
+    name: str
+    texts: list[str]
 
 
 @dataclass(frozen=True)
@@ -344,3 +374,64 @@ class Database:
                 (work_id,),
             ).fetchall()
         return [ChapterSummary(r[0], r[1], r[2], r[3] or 0, r[4] or 0, r[5]) for r in rows]
+
+    # --- personagens ------------------------------------------------------------
+
+    def characters(self, work_id: int | None) -> list[Character]:
+        if work_id is None:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT nome, nome_original, genero, jeito_de_falar, notas FROM personagens WHERE obra_id = ? ORDER BY id",
+                (work_id,),
+            ).fetchall()
+        return [Character(*row) for row in rows]
+
+    def save_characters(self, work_id: int, characters: list[Character]) -> None:
+        """Substitui a lista da obra (a tela da lista sempre edita a lista inteira)."""
+        unique: dict[str, Character] = {}
+        for character in characters:
+            if character.name.strip():
+                unique.setdefault(character.name.strip().casefold(), character)
+        with self._lock:
+            self._conn.execute("BEGIN")
+            self._conn.execute("DELETE FROM personagens WHERE obra_id = ?", (work_id,))
+            self._conn.executemany(
+                """INSERT INTO personagens (obra_id, nome, nome_original, genero, jeito_de_falar, notas)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (work_id, c.name.strip(), c.original.strip(), c.gender.strip(), c.speech.strip(), c.notes.strip())
+                    for c in unique.values()
+                ],
+            )
+            self._conn.execute("COMMIT")
+
+    def chapter_texts(self, work_id: int, only_pending_names: bool) -> list[ChapterTexts]:
+        """Texto lido de cada capítulo importado (já passado pelo OCR), em ordem de leitura."""
+        query = """SELECT c.id, c.nome, r.texto_original FROM capitulos c
+                   JOIN paginas p ON p.capitulo_id = c.id JOIN regioes r ON r.pagina_id = p.id
+                   WHERE c.obra_id = ?"""
+        if only_pending_names:
+            query += " AND c.nomes_levantados = 0"
+        query += " ORDER BY c.ordem, c.nome, p.numero, r.ordem"
+        with self._lock:
+            rows = self._conn.execute(query, (work_id,)).fetchall()
+        chapters: dict[int, ChapterTexts] = {}
+        for chapter_id, name, text in rows:
+            chapters.setdefault(chapter_id, ChapterTexts(chapter_id, name, [])).texts.append(text)
+        return list(chapters.values())
+
+    def mark_names_surveyed(self, chapter_ids: list[int]) -> None:
+        with self._lock:
+            self._conn.executemany("UPDATE capitulos SET nomes_levantados = 1 WHERE id = ?", [(i,) for i in chapter_ids])
+
+    def read_texts(self, work_id: int) -> list[str]:
+        """Todo texto original conhecido da obra: capítulos importados e falas traduzidas na tela."""
+        with self._lock:
+            imported = self._conn.execute(
+                """SELECT r.texto_original FROM regioes r JOIN paginas p ON p.id = r.pagina_id
+                   JOIN capitulos c ON c.id = p.capitulo_id WHERE c.obra_id = ?""",
+                (work_id,),
+            ).fetchall()
+            screen = self._conn.execute("SELECT texto_original FROM traducoes WHERE obra_id = ?", (work_id,)).fetchall()
+        return [row[0] for row in imported + screen]

@@ -50,6 +50,16 @@ A detecção dos balões e o OCR rodam na sua GPU, sem custo de API; o texto de 
 
 Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continua das páginas que faltavam ("Retomar importação" no menu também faz isso). Capítulos já importados na mesma obra são ignorados se escolhidos de novo.
 
+## Personagens da obra
+
+"Personagens da obra…" no menu da bandeja abre a lista de personagens da obra atual. Ela vai junto em toda tradução com IA (OpenAI ou Claude) daquela obra, para que cada personagem tenha sempre o mesmo nome, gênero e jeito de falar. O NLLB e o Google gratuito não usam a lista.
+
+- **Manual:** só o nome como você quer ver na tradução é obrigatório; o nome original, o gênero, o jeito de falar e as notas são opcionais. Não é preciso digitar em japonês: a coluna "Encontrados no texto" mostra nomes achados no texto já lido (pelos tratamentos como さん, ちゃん, 先生, 씨, 선배 e por palavras em katakana); duplo clique adiciona.
+- **Levantamento rápido:** a IA lê os 3 primeiros capítulos importados ainda não analisados, com o modelo principal, e sugere os personagens.
+- **Levantamento completo:** lê todos os capítulos importados ainda não analisados, com um modelo barato (padrão `gpt-5.4-nano` ou `claude-haiku-4-5`).
+
+Os dois levantamentos mostram o custo estimado antes de enviar e trazem as sugestões destacadas para revisão; nada é salvo sem clicar em Salvar. Capítulos já analisados não são lidos de novo nos próximos levantamentos.
+
 ## Motores
 
 | Motor | Precisa de | Observação |

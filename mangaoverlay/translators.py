@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .db import Character
 from .languages import AUTO, SOURCES, TARGETS, source_english, target_english
 
 
@@ -94,7 +95,23 @@ def _source_clause(source: str) -> str:
     return f"The source language is {source_english(source)}"
 
 
-def llm_instructions(source: str, target: str, vision: bool) -> str:
+def characters_block(characters: list[Character]) -> str:
+    """Lista de personagens da obra, no formato que vai para o modelo (vazio se não houver)."""
+    if not characters:
+        return ""
+    lines = []
+    for c in characters:
+        details = [d for d in (c.gender, c.speech, c.notes) if d]
+        original = f"{c.original} → " if c.original else ""
+        lines.append(f"- {original}{c.name}" + (f" ({'; '.join(details)})" if details else ""))
+    return (
+        "\n\nCharacters of this series (original name → name to use in the translation; gender and way of speaking "
+        "in Portuguese when given). Always write these names exactly as listed and respect gender and speech style:\n"
+        + "\n".join(lines)
+    )
+
+
+def llm_instructions(source: str, target: str, vision: bool, characters: list[Character] | None = None) -> str:
     task = (
         "The user sends a screenshot of a comic page. Each text to translate is marked with a red box and its "
         "number. For every numbered box, transcribe the original text inside it and translate it."
@@ -110,7 +127,7 @@ def llm_instructions(source: str, target: str, vision: bool) -> str:
         "the original speech bubble. The texts are in reading order and belong to the same scene; "
         "the optional context holds the lines of the previous pages. "
         "Return one item per number, with an empty translation if a box has no readable text."
-    )
+    ) + characters_block(characters or [])
 
 
 def response_schema(vision: bool) -> dict:

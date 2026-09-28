@@ -7,15 +7,17 @@ deixe a página sem tradução.
 
 import base64
 
+from .db import Character
 from .translators import Line, Result, TranslationError, llm_instructions, parse_response, response_schema, text_request
 
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
-def _call(api_key: str, model: str, system: str, content: list[dict], vision: bool) -> str:
+def structured(api_key: str, model: str, system: str, content: list[dict], schema: dict) -> str:
+    """Uma chamada com resposta em JSON garantida pelo schema. Retorna o texto JSON."""
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=90)
+    client = anthropic.Anthropic(api_key=api_key, timeout=180)
     try:
         response = client.beta.messages.create(
             model=model,
@@ -24,7 +26,7 @@ def _call(api_key: str, model: str, system: str, content: list[dict], vision: bo
             messages=[{"role": "user", "content": content}],
             output_config={
                 "effort": "low",
-                "format": {"type": "json_schema", "schema": response_schema(vision)},
+                "format": {"type": "json_schema", "schema": schema},
             },
             betas=[_FALLBACK_BETA],
             fallbacks="default",
@@ -41,32 +43,41 @@ def _call(api_key: str, model: str, system: str, content: list[dict], vision: bo
         raise TranslationError("Sem conexão com a API do Claude.") from exc
 
     if response.stop_reason == "refusal":
-        raise TranslationError("O Claude recusou traduzir esta tela.")
+        raise TranslationError("O Claude recusou o pedido.")
     if response.stop_reason == "max_tokens":
-        raise TranslationError("A resposta do Claude foi cortada (texto demais na tela).")
+        raise TranslationError("A resposta do Claude foi cortada (texto demais de uma vez).")
     return next((block.text for block in response.content if block.type == "text"), "")
 
 
-def translate_text(lines: list[Line], context: list[str], source: str, target: str, model: str, api_key: str) -> list[Result]:
-    raw = _call(
+def translate_text(
+    lines: list[Line], context: list[str], source: str, target: str, model: str, api_key: str, characters: list[Character] | None = None
+) -> list[Result]:
+    raw = structured(
         api_key,
         model,
-        llm_instructions(source, target, vision=False),
+        llm_instructions(source, target, False, characters),
         [{"type": "text", "text": text_request(lines, context)}],
-        vision=False,
+        response_schema(False),
     )
     return parse_response(raw, lines)
 
 
 def translate_image(
-    page_jpeg: bytes, lines: list[Line], context: list[str], source: str, target: str, model: str, api_key: str
+    page_jpeg: bytes,
+    lines: list[Line],
+    context: list[str],
+    source: str,
+    target: str,
+    model: str,
+    api_key: str,
+    characters: list[Character] | None = None,
 ) -> list[Result]:
     numbers = ", ".join(str(line.id) for line in lines)
     context_text = "\n".join(context) or "(none)"
-    raw = _call(
+    raw = structured(
         api_key,
         model,
-        llm_instructions(source, target, vision=True),
+        llm_instructions(source, target, True, characters),
         [
             {
                 "type": "image",
@@ -74,6 +85,6 @@ def translate_image(
             },
             {"type": "text", "text": f"Context from previous pages:\n{context_text}\n\nBoxes: {numbers}"},
         ],
-        vision=True,
+        response_schema(True),
     )
     return parse_response(raw, lines)

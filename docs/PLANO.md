@@ -51,15 +51,16 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 ### Fase 3: Lista de personagens
 
-- [ ] Tela da lista, por obra: nome na tradução (obrigatório), nome original (opcional), gênero, jeito de falar e notas. Dá para digitar ou colar.
-- [ ] Sugestões de nomes originais tiradas dos textos lidos pelo OCR, para escolher em vez de digitar em japonês, coreano ou chinês.
-- [ ] Levantamento **rápido** (padrão): analisa só os 2–3 primeiros capítulos ainda não analisados, com o modelo principal.
-- [ ] Levantamento **completo** (opcional): todos os capítulos, com o modelo definido em "Modelo para levantamento de nomes" (padrão `gpt-5.4-nano`).
-- [ ] O resultado do levantamento abre na tela da lista para revisão antes de ser usado.
-- [ ] Reaproveitamento: o levantamento só analisa capítulos que ainda não foram analisados.
-- [ ] A lista vai junto em toda tradução daquela obra (modo página a página e lote).
+- [x] Tela da lista, por obra: nome na tradução (obrigatório), nome original (opcional), gênero, jeito de falar e notas. Dá para digitar ou colar.
+- [x] Sugestões de nomes originais tiradas dos textos lidos pelo OCR, para escolher em vez de digitar em japonês ou coreano (pelos tratamentos さん/ちゃん/先生/씨/선배… e por katakana). Chinês fica sem sugestões locais: não tem um padrão confiável de tratamento.
+- [x] Levantamento **rápido** (padrão): analisa só os 3 primeiros capítulos ainda não analisados, com o modelo principal.
+- [x] Levantamento **completo** (opcional): todos os capítulos, com o modelo de levantamento (padrão `gpt-5.4-nano`; `claude-haiku-4-5` para o Claude). Textos grandes são divididos em pedidos de ~30 mil tokens.
+- [x] O resultado do levantamento abre na tela da lista para revisão antes de ser usado; os capítulos só são marcados como analisados ao salvar.
+- [x] Reaproveitamento: o levantamento só analisa capítulos que ainda não foram analisados.
+- [x] A lista vai junto em toda tradução com IA daquela obra (hoje no modo página a página; o lote usa a mesma função nas fases 4 e 5).
+- [x] Custo estimado mostrado antes de enviar (tabela de preços em `pricing.py`, reaproveitada na Fase 4).
 
-**Pronto quando:** um lote traduzido com a lista mantém o mesmo nome e gênero de cada personagem em todos os capítulos.
+**Pronto quando:** um lote traduzido com a lista mantém o mesmo nome e gênero de cada personagem em todos os capítulos. ⏳ A parte "lote" depende das fases 4 e 5; a lista já vai em toda tradução página a página, e o levantamento foi validado com chamadas reais à OpenAI (`gpt-4.1-mini` e `gpt-5.4-nano`).
 
 ### Fase 4: Fila de envio com blocos configuráveis
 
