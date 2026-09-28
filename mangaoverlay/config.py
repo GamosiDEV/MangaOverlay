@@ -55,6 +55,8 @@ class Config:
     batch_pages_per_block: int = 20
     # Último modo escolhido para o lote: "normal" ou "batch" (Batch API da OpenAI)
     batch_mode: str = "normal"
+    # Memória da obra: resumo da história atualizado a cada capítulo traduzido em lote (modelo barato)
+    memory_summary: bool = True
     names_model_openai: str = "gpt-5.4-nano"
     names_model_claude: str = "claude-haiku-4-5"
     # Usa a GPU (CUDA) para os modelos locais, se houver

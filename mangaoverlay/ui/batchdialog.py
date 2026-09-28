@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -85,9 +86,17 @@ class BatchDialog(QDialog):
             self.mode_batch.setToolTip("Disponível só com os motores da OpenAI.")
         (self.mode_batch if self.mode_batch.isEnabled() and config.batch_mode == "batch" else self.mode_normal).setChecked(True)
         self.mode_normal.toggled.connect(self._update_estimate)
+        # Modo híbrido: o 1º capítulo na hora monta a memória antes do resto ir à OpenAI
+        self.hybrid = QCheckBox("Traduzir o 1º capítulo marcado na hora, para montar a memória da obra antes de enviar o resto")
+        self.hybrid.setChecked(db.memory(work.id).empty)
+        self.hybrid.toggled.connect(self._update_estimate)
         mode_box = QVBoxLayout()
         mode_box.addWidget(self.mode_normal)
         mode_box.addWidget(self.mode_batch)
+        hybrid_row = QHBoxLayout()
+        hybrid_row.addSpacing(24)
+        hybrid_row.addWidget(self.hybrid, 1)
+        mode_box.addLayout(hybrid_row)
 
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
@@ -117,6 +126,13 @@ class BatchDialog(QDialog):
     @property
     def mode(self) -> str:
         return "batch" if self.mode_batch.isChecked() else "normal"
+
+    def sync_pages(self) -> int:
+        """Páginas do 1º capítulo marcado, traduzidas na hora no modo híbrido (0 se não se aplica)."""
+        chapters = self.selected_chapters()
+        if self.mode != "batch" or not self.hybrid.isChecked() or len(chapters) < 2:
+            return 0
+        return len(self._db.chapter_pages(chapters[:1]))
 
     def selected_chapters(self) -> list[int]:
         return [
@@ -150,6 +166,8 @@ class BatchDialog(QDialog):
             cost = pricing.format_cost(e.cost * (0.5 if batch else 1.0) if e.cost is not None else None) if llm else "grátis"
             if batch and e.cost is not None:
                 cost += f" (no envio normal: {pricing.format_cost(e.cost)})"
+            if llm and e.summary_cost:
+                cost += f" + resumos da memória: {pricing.format_cost(e.summary_cost)}"
             text = (
                 f"<b>{e.new_lines} falas a traduzir</b> em {e.requests} pedido(s), de {e.pages} páginas"
                 + (f" ({repeated} já traduzidas ou repetidas não são enviadas)" if repeated else "")
@@ -158,6 +176,7 @@ class BatchDialog(QDialog):
             if llm:
                 text += f" (~{pricing.thousands(e.input_tokens)} tokens de entrada, ~{pricing.thousands(e.output_tokens)} de saída)"
         self.summary.setText(text)
+        self.hybrid.setVisible(self.mode == "batch")
         self.start.setEnabled(e.new_lines > 0 and not too_big)
 
 

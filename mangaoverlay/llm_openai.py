@@ -2,11 +2,27 @@
 
 import base64
 
-from .db import Character
-from .translators import Line, Result, TranslationError, Usage, llm_instructions, parse_response, response_schema, text_request
+from .db import Character, Memory, Term
+from .translators import (
+    Line,
+    Result,
+    TranslationError,
+    Usage,
+    llm_instructions,
+    parse_response,
+    parse_terms,
+    response_schema,
+    text_request,
+)
 
 
-def request_body(model: str, instructions: str, input, schema: dict, name: str) -> dict:
+def cache_key(work_id: int | None) -> str | None:
+    """Agrupa os pedidos de uma obra no mesmo servidor da OpenAI: sem isso o cache de prompt quase não acontece
+    (testado: 0 tokens em cache sem a chave; ~90% da entrada em cache com ela)."""
+    return f"mangaoverlay-obra-{work_id}" if work_id is not None else None
+
+
+def request_body(model: str, instructions: str, input, schema: dict, name: str, prompt_cache_key: str | None = None) -> dict:
     """Parâmetros da Responses API; o mesmo corpo serve para a chamada normal e para a Batch API."""
     body = {
         "model": model,
@@ -17,13 +33,29 @@ def request_body(model: str, instructions: str, input, schema: dict, name: str) 
     if model.startswith("gpt-5"):
         # Modelos de raciocínio: o raciocínio é cobrado como saída; tarefa simples, esforço baixo
         body["reasoning"] = {"effort": "low"}
+    if prompt_cache_key:
+        body["prompt_cache_key"] = prompt_cache_key
     return body
 
 
-def text_body(lines: list[Line], context: list[str], source: str, target: str, model: str, characters: list[Character] | None) -> dict:
-    """Corpo de um pedido de tradução no modo texto (usado pelo lote da Batch API)."""
+def text_body(
+    lines: list[Line],
+    context: list[str],
+    source: str,
+    target: str,
+    model: str,
+    characters: list[Character] | None,
+    memory: Memory | None = None,
+    work_id: int | None = None,
+) -> dict:
+    """Corpo de um pedido de tradução no modo texto (envio normal e Batch API)."""
     return request_body(
-        model, llm_instructions(source, target, False, characters), text_request(lines, context), response_schema(False), "translations"
+        model,
+        llm_instructions(source, target, False, characters, memory),
+        text_request(lines, context),
+        response_schema(False),
+        "translations",
+        cache_key(work_id),
     )
 
 
@@ -41,13 +73,15 @@ def parse_body(body: dict) -> tuple[str, Usage]:
     return text, Usage(usage.get("input_tokens", 0), details.get("cached_tokens", 0) or 0, usage.get("output_tokens", 0))
 
 
-def structured(api_key: str, model: str, instructions: str, input, schema: dict, name: str) -> tuple[str, Usage]:
+def structured(
+    api_key: str, model: str, instructions: str, input, schema: dict, name: str, prompt_cache_key: str | None = None
+) -> tuple[str, Usage]:
     """Uma chamada com resposta em JSON garantida pelo schema. Retorna o texto JSON e o uso de tokens."""
     import openai
 
     client = openai.OpenAI(api_key=api_key, timeout=180)
     try:
-        response = client.responses.create(**request_body(model, instructions, input, schema, name))
+        response = client.responses.create(**request_body(model, instructions, input, schema, name, prompt_cache_key))
     except openai.AuthenticationError as exc:
         raise TranslationError("Chave da API da OpenAI inválida.") from exc
     except openai.NotFoundError as exc:
@@ -75,12 +109,21 @@ def structured(api_key: str, model: str, instructions: str, input, schema: dict,
 
 
 def translate_text(
-    lines: list[Line], context: list[str], source: str, target: str, model: str, api_key: str, characters: list[Character] | None = None
-) -> tuple[list[Result], Usage]:
+    lines: list[Line],
+    context: list[str],
+    source: str,
+    target: str,
+    model: str,
+    api_key: str,
+    characters: list[Character] | None = None,
+    memory: Memory | None = None,
+    work_id: int | None = None,
+) -> tuple[list[Result], Usage, list[Term]]:
+    body = text_body(lines, context, source, target, model, characters, memory, work_id)
     raw, usage = structured(
-        api_key, model, llm_instructions(source, target, False, characters), text_request(lines, context), response_schema(False), "translations"
+        api_key, model, body["instructions"], body["input"], response_schema(False), "translations", cache_key(work_id)
     )
-    return parse_response(raw, lines), usage
+    return parse_response(raw, lines), usage, parse_terms(raw)
 
 
 def translate_image(
@@ -92,7 +135,9 @@ def translate_image(
     model: str,
     api_key: str,
     characters: list[Character] | None = None,
-) -> tuple[list[Result], Usage]:
+    memory: Memory | None = None,
+    work_id: int | None = None,
+) -> tuple[list[Result], Usage, list[Term]]:
     data_url = "data:image/jpeg;base64," + base64.b64encode(page_jpeg).decode()
     numbers = ", ".join(str(line.id) for line in lines)
     context_text = "\n".join(context) or "(none)"
@@ -101,6 +146,12 @@ def translate_image(
         {"type": "input_image", "image_url": data_url},
     ]
     raw, usage = structured(
-        api_key, model, llm_instructions(source, target, True, characters), [{"role": "user", "content": content}], response_schema(True), "translations"
+        api_key,
+        model,
+        llm_instructions(source, target, True, characters, memory),
+        [{"role": "user", "content": content}],
+        response_schema(True),
+        "translations",
+        cache_key(work_id),
     )
-    return parse_response(raw, lines), usage
+    return parse_response(raw, lines), usage, parse_terms(raw)

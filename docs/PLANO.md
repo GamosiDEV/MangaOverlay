@@ -87,13 +87,14 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 ### Fase 6: Memória da obra
 
-- [ ] Glossário automático: a cada bloco o modelo devolve também os termos e nomes novos, que vão para a memória da obra.
-- [ ] Resumo da história atualizado a cada capítulo (chamada curta e barata).
-- [ ] A memória vai no início de toda requisição da obra, em ordem fixa, para aproveitar o cache de prompt automático da OpenAI (entrada em cache custa de 10 a 25% do preço normal).
-- [ ] Tamanho da memória limitado (~2.000 tokens), para o custo por página não crescer com o tempo.
-- [ ] Modo híbrido do lote (vindo da Fase 5): traduzir os 1–2 primeiros capítulos em envio normal para montar a memória, e o resto pela Batch API já com ela.
+- [x] Glossário automático: a cada bloco (e a cada página na tela) o modelo devolve também os termos novos (`new_terms`), que entram como pendentes na memória da obra (migração 6).
+- [x] Resumo da história atualizado a cada capítulo concluído (modelo barato, só com o texto traduzido; ~US$ 0,001 por capítulo; pode ser desligado).
+- [x] A memória vai no início de toda requisição da obra, em ordem fixa, e só muda em pontos fixos (fim de capítulo; a cada 15 termos na tela), para aproveitar o cache de prompt. OpenAI: `prompt_cache_key` por obra (sem ela o cache não acontecia nos testes). Claude: cache marcado no fim das instruções.
+- [x] Tamanho da memória limitado (80 termos + resumo de ~180 palavras), para o custo por página não crescer com o tempo.
+- [x] Modo híbrido do lote (vindo da Fase 5): o 1º capítulo traduzido na hora para montar a memória; o resto vai à Batch API já com ela.
+- [x] Tela "Memória da obra…" para ver o resumo e o glossário e apagá-los.
 
-**Pronto quando:** o custo por página de uma obra com 30 capítulos lidos é o mesmo de uma obra nova, e o uso reportado pela API mostra entrada em cache.
+**Pronto quando:** o custo por página de uma obra com 30 capítulos lidos é o mesmo de uma obra nova, e o uso reportado pela API mostra entrada em cache. ✅ Verificado: a memória tem teto fixo (não cresce com os capítulos) e, com a API real, a 2ª e a 3ª chamadas com a mesma memória vieram com 1.408 de ~1.570 tokens em cache.
 
 ### Fase 7: Revisão de nomes
 

@@ -14,6 +14,7 @@ from . import credentials, llm_anthropic, llm_openai, translators
 from .colorize import Colorizer, find_page
 from .config import VISION_ENGINES, Config
 from .db import Database, TranslationKey, normalize
+from .memory import GLOSSARY_LIMIT, SCREEN_CONSOLIDATE_EVERY
 from .detector import Box, Detector, Region
 from .languages import AUTO, looks_like
 from .ocr import OcrEngine
@@ -358,20 +359,22 @@ class Pipeline:
         """Chama o motor configurado para (índice da região, texto lido). Retorna índice -> resultado."""
         source, target, engine = config.source_lang, config.target_lang, config.engine
         context = list(self._context)
-        # Lista de personagens da obra: nomes e gênero consistentes (só os motores com LLM a usam)
+        # Lista de personagens e memória da obra: nomes, termos e contexto consistentes (só os motores com LLM usam)
         characters = self._db.characters(config.current_work) if self._db is not None else []
+        memory = self._db.memory(config.current_work) if self._db is not None else None
+        terms = []
         # Números a partir de 1 (no modo visão, são os que aparecem desenhados na imagem enviada)
         lines = [Line(n, text) for n, (_i, text) in enumerate(lines_by_index, start=1)]
 
         if engine in VISION_ENGINES:
             page = translators.marked_page(image, {line.id: regions[i].text_box for line, (i, _t) in zip(lines, lines_by_index)})
             if engine == "openai-vision":
-                out, _usage = llm_openai.translate_image(
-                    page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters
+                out, _usage, terms = llm_openai.translate_image(
+                    page, lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters, memory, config.current_work
                 )
             else:
-                out, _usage = llm_anthropic.translate_image(
-                    page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters
+                out, _usage, terms = llm_anthropic.translate_image(
+                    page, lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters, memory
                 )
         elif engine == "google":
             out = translators.translate_google(lines, source, target)
@@ -381,13 +384,18 @@ class Pipeline:
                 self._nllb = translators.NllbTranslator(self._device)
             out = self._nllb.translate(lines, source, target)
         elif engine == "openai-text":
-            out, _usage = llm_openai.translate_text(
-                lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters
+            out, _usage, terms = llm_openai.translate_text(
+                lines, context, source, target, config.openai_model, self._key(credentials.OPENAI), characters, memory, config.current_work
             )
         else:
-            out, _usage = llm_anthropic.translate_text(
-                lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters
+            out, _usage, terms = llm_anthropic.translate_text(
+                lines, context, source, target, config.claude_model, self._key(credentials.ANTHROPIC), characters, memory
             )
+        if terms and self._db is not None and config.current_work is not None:
+            self._db.add_terms(config.current_work, terms)
+            # A foto da memória só muda de vez em quando, para não quebrar o cache de prompt a cada página
+            if self._db.pending_terms(config.current_work) >= SCREEN_CONSOLIDATE_EVERY:
+                self._db.consolidate_terms(config.current_work, GLOSSARY_LIMIT)
         return {lines_by_index[r.id - 1][0]: r for r in out}
 
     @staticmethod

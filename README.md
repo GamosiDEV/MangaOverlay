@@ -74,6 +74,17 @@ O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: O
 
 Os dois levantamentos mostram o custo estimado antes de enviar e trazem as sugestões destacadas para revisão; nada é salvo sem clicar em Salvar. Capítulos já analisados não são lidos de novo nos próximos levantamentos.
 
+## Memória da obra
+
+Além da lista de personagens, cada obra tem uma memória que vai junto em toda tradução com IA:
+
+- **Glossário:** a cada tradução, o modelo informa os termos novos que encontrou (lugares, grupos, técnicas, bordões) e como os traduziu. Eles passam a ser usados sempre do mesmo jeito. Até 80 termos, os mais frequentes.
+- **Resumo da história:** atualizado quando um capítulo termina de ser traduzido em lote, com o modelo barato (`gpt-5.4-nano` ou `claude-haiku-4-5`), só com o texto já traduzido; cerca de US$ 0,001 por capítulo. Pode ser desligado em Configurações.
+
+A memória só muda em pontos fixos (fim de capítulo no lote, ou a cada 15 termos novos na leitura pela tela). Assim o começo dos pedidos fica idêntico durante o capítulo e o cache de prompt funciona: nos testes com a OpenAI, ~90% da entrada veio do cache (que custa 25% do preço no `gpt-4.1-mini`). "Memória da obra…" no menu mostra o resumo e o glossário e permite apagá-los.
+
+Na Batch API, o **modo híbrido** traduz o 1º capítulo na hora para montar a memória e envia o resto à OpenAI já com ela.
+
 ## Motores
 
 | Motor | Precisa de | Observação |

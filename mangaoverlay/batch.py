@@ -19,9 +19,10 @@ from PySide6.QtCore import QObject, Signal
 
 from . import credentials, llm_anthropic, llm_openai, openai_batch, pricing, translators
 from .config import Config
-from .db import Batch, BatchSummary, Character, Database, SourceLine, TranslationKey, normalize
+from .db import Batch, BatchSummary, Character, Database, Memory, SourceLine, Term, TranslationKey, normalize
+from .memory import estimate_summary_cost, summarize_chapters
 from .pipeline import Pipeline
-from .translators import Line, MalformedResponse, Result, TranslationError, Usage, llm_instructions, parse_response
+from .translators import Line, MalformedResponse, Result, TranslationError, Usage, llm_instructions, parse_response, parse_terms
 
 # O lote sempre usa o modo texto: os capítulos importados já têm o texto lido pelo OCR local
 TEXT_ENGINE = {"openai-vision": "openai-text", "claude-vision": "claude-text"}
@@ -68,6 +69,7 @@ class Estimate:
     output_tokens: int
     cost: float | None  # None: modelo sem preço conhecido; 0: motor gratuito
     max_pages_per_block: int  # teto seguro para o limite de saída do modelo
+    summary_cost: float | None = 0.0  # resumos da memória (um por capítulo, modelo barato)
 
 
 def estimate(db: Database, config: Config, work_id: int, source_lang: str, chapter_ids: list[int], pages_per_block: int) -> Estimate:
@@ -92,9 +94,19 @@ def estimate(db: Database, config: Config, work_id: int, source_lang: str, chapt
     requests = sum(1 for block in blocks if any(p in new_by_page for p in block))
 
     characters = db.characters(work_id)
-    fixed = pricing.estimate_tokens(llm_instructions(source_lang, key.target, False, characters)) + 25 * _CONTEXT_LINES
+    memory = db.memory(work_id)
+    # A memória cresce durante o lote: estima com ~1.500 tokens se ainda estiver vazia
+    memory_tokens = 0 if not memory.empty else 1500
+    fixed = pricing.estimate_tokens(llm_instructions(source_lang, key.target, False, characters, memory)) + memory_tokens + 25 * _CONTEXT_LINES
     input_tokens = requests * fixed + sum(pricing.estimate_tokens(t) + 10 for texts in new_by_page.values() for t in texts)
     output_tokens = sum(output_by_page.values())
+
+    # Resumo de cada capítulo com falas novas (modelo barato; entrada ≈ a tradução do capítulo)
+    chapter_of_page = {page: chapter for chapter in chapter_ids for page, _t in by_chapter.get(chapter, [])}
+    summary_tokens: dict[int, int] = {}
+    for page, tokens in output_by_page.items():
+        summary_tokens[chapter_of_page[page]] = summary_tokens.get(chapter_of_page[page], 0) + tokens
+    summary_cost = estimate_summary_cost(config, key.engine, list(summary_tokens.values())) if key.engine in LLM_ENGINES else 0.0
 
     if key.engine in LLM_ENGINES:
         cost = pricing.cost(key.model, input_tokens, output_tokens) if requests else 0.0
@@ -103,7 +115,7 @@ def estimate(db: Database, config: Config, work_id: int, source_lang: str, chapt
         max_pages = max(1, min(100, math.floor(max_output_tokens(key.model) * 0.5 / per_page)))
     else:
         cost, max_pages = 0.0, 100
-    return Estimate(len(page_ids), len(lines), new_lines, requests, input_tokens, output_tokens, cost, max_pages)
+    return Estimate(len(page_ids), len(lines), new_lines, requests, input_tokens, output_tokens, cost, max_pages, summary_cost)
 
 
 # --- execução ----------------------------------------------------------------------------
@@ -175,7 +187,7 @@ class BatchRunner(QObject):
             if self._stop.is_set():
                 break
             if batch.mode == "batch":
-                self._step_remote(batch)
+                self._step_remote(batch, config)
             else:
                 self._run_batch(batch, config)
 
@@ -228,6 +240,7 @@ class BatchRunner(QObject):
         total: int,
     ) -> None:
         source_lines = self._db.request_lines(request_id)
+        memory = self._db.memory(batch.work_id)  # foto: não muda durante o bloco
         usage = Usage()
         cost = 0.0
         missing: list = []
@@ -238,7 +251,7 @@ class BatchRunner(QObject):
             self._emit(batch, total, f"Bloco {order} de {total}: {len(missing)} fala(s)")
             lines = [Line(n, line.text, f"{line.chapter}, p. {line.page}") for n, line in enumerate(missing, start=1)]
             try:
-                results, call_usage = self._call(key, lines, list(context), characters, config)
+                results, call_usage, terms = self._call(key, lines, list(context), characters, memory, config)
             except MalformedResponse:
                 continue  # resposta fora do formato: nova rodada com o que falta
             except TranslationError as exc:
@@ -247,6 +260,7 @@ class BatchRunner(QObject):
             usage = usage + call_usage
             cost += pricing.cost(key.model, call_usage.input_tokens, call_usage.output_tokens, call_usage.cached_tokens) or 0.0
             self._db.save_translations(key, [(lines[r.id - 1].text, r.translation) for r in results if r.translation])
+            self._db.add_terms(batch.work_id, terms)
 
         context.extend(line.text for line in source_lines)
         if missing:
@@ -255,7 +269,16 @@ class BatchRunner(QObject):
             )
         else:
             self._db.record_request(request_id, "concluida", _usage_tuple(usage), cost)
+        self._update_memory(key, config, request_id)
         self._emit(batch, total, f"Bloco {order} de {total} concluído")
+
+    def _update_memory(self, key: TranslationKey, config: Config, request_id: int) -> None:
+        """Capítulos que ficaram completos: resumo da história e nova foto do glossário (custo somado ao lote)."""
+        if key.engine not in LLM_ENGINES:
+            return
+        result = summarize_chapters(self._db, config, key)
+        if result.cost or result.usage.input_tokens:
+            self._db.add_request_cost(request_id, _usage_tuple(result.usage), result.cost)
 
     def _missing(self, key: TranslationKey, source_lines: list[SourceLine]) -> list[SourceLine]:
         """Uma fala por texto (as repetidas usam a mesma tradução), só as que ainda não têm tradução salva."""
@@ -269,7 +292,7 @@ class BatchRunner(QObject):
 
     # --- Batch API da OpenAI -------------------------------------------------------------
 
-    def _step_remote(self, batch: Batch) -> None:
+    def _step_remote(self, batch: Batch, config: Config) -> None:
         """Uma passada num lote da Batch API: envia (se ainda não enviado) ou confere o andamento.
 
         O app chama de novo a cada minuto enquanto houver lote esperando a OpenAI.
@@ -284,10 +307,10 @@ class BatchRunner(QObject):
                 if batch.pause_requested:
                     self._db.request_pause(batch.id, False)
                     self._finish(batch, "pausado", None)
-                else:
-                    self._submit_remote(batch, key, api_key, batch.round + 1)
+                elif self._run_sync_part(batch, key, config):
+                    self._submit_remote(batch, key, api_key, batch.round + 1, config)
             else:
-                self._poll_remote(batch, key, api_key)
+                self._poll_remote(batch, key, api_key, config)
         except TranslationError as exc:
             if exc.retryable:
                 # Sem conexão agora: o lote segue ativo e a próxima passada tenta de novo
@@ -295,12 +318,32 @@ class BatchRunner(QObject):
             else:
                 self._finish(batch, "pausado", str(exc))
 
+    def _run_sync_part(self, batch: Batch, key: TranslationKey, config: Config) -> bool:
+        """Modo híbrido: traduz na hora os blocos marcados como síncronos (e resume os capítulos deles), para o
+        resto ir à OpenAI já com a memória. False se o lote pausou no meio."""
+        all_requests = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
+        sync = [r for r in all_requests if r.sync and r.state == "pendente"]
+        if not sync:
+            return True
+        characters = self._db.characters(batch.work_id)
+        context: deque[str] = deque(maxlen=_CONTEXT_LINES)
+        for request in sync:
+            if self._stop.is_set():
+                return False
+            try:
+                self._execute(batch, key, request.id, request.order, characters, context, config, len(all_requests))
+            except _Pause as exc:
+                self._finish(batch, "pausado", None if self._stop.is_set() else str(exc))
+                return False
+        return True
+
     def _finish(self, batch: Batch, state: str, error: str | None) -> None:
         self._db.set_batch_state(batch.id, state, error)
         self.finished.emit(BatchOutcome(batch.id, state, self._db.batch_summary(batch.id), error))
 
-    def _submit_remote(self, batch: Batch, key: TranslationKey, api_key: str, round: int) -> None:
+    def _submit_remote(self, batch: Batch, key: TranslationKey, api_key: str, round: int, config: Config) -> None:
         characters = self._db.characters(batch.work_id)
+        memory = self._db.memory(batch.work_id)  # mesma foto em todos os pedidos do envio (cache de prompt)
         all_requests = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
         payload: dict[str, dict] = {}
         for request in self._db.batch_requests(batch.id, ("pendente",)):
@@ -318,7 +361,9 @@ class BatchRunner(QObject):
             context = [line.text for line in self._db.request_lines(previous[-1].id)][-_CONTEXT_LINES:] if previous else []
             lines = [Line(n, line.text, f"{line.chapter}, p. {line.page}") for n, line in enumerate(missing, start=1)]
             self._db.set_sent(request.id, [line.text for line in missing])
-            payload[str(request.id)] = llm_openai.text_body(lines, context, key.source, key.target, key.model, characters)
+            payload[str(request.id)] = llm_openai.text_body(
+                lines, context, key.source, key.target, key.model, characters, memory, batch.work_id
+            )
 
         if not payload:
             self._db.set_remote(batch.id, None, None, round - 1)
@@ -332,7 +377,7 @@ class BatchRunner(QObject):
                           f"{len(payload)} pedido(s) enviados à Batch API da OpenAI{extra}. Aguardando a OpenAI processar…")
         )
 
-    def _poll_remote(self, batch: Batch, key: TranslationKey, api_key: str) -> None:
+    def _poll_remote(self, batch: Batch, key: TranslationKey, api_key: str, config: Config) -> None:
         remote = openai_batch.status(api_key, batch.remote_id)
         self._db.set_remote(batch.id, batch.remote_id, remote.status)
         if batch.pause_requested and remote.status in ("validating", "in_progress", "finalizing"):
@@ -366,6 +411,7 @@ class BatchRunner(QObject):
             except MalformedResponse:
                 results = []  # as falas continuam faltando e vão no próximo envio
             self._db.save_translations(key, [(sent[r.id - 1], r.translation) for r in results if r.translation])
+            self._db.add_terms(batch.work_id, parse_terms(text))
             cost = pricing.cost(key.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, openai_batch.DISCOUNT) or 0.0
             self._db.record_request(request_id, "pendente", _usage_tuple(usage), cost)
         for item in openai_batch.download(api_key, remote.error_file_id):
@@ -373,31 +419,41 @@ class BatchRunner(QObject):
             self._db.record_request(int(item["custom_id"]), "pendente", (0, 0, 0), 0.0, error)
         self._db.set_remote(batch.id, None, None)
 
+        # Capítulos que ficaram completos: resumo e nova foto do glossário (para os próximos lotes e a leitura)
+        first = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
+        self._update_memory(key, config, first[0].id)
         if batch.pause_requested:
             self._db.request_pause(batch.id, False)
             self._finish(batch, "pausado", None)
             return
         # Marca o que ficou completo e reenvia só as falas que faltaram (até 2 rodadas extras)
-        self._submit_remote(batch, key, api_key, batch.round + 1)
+        self._submit_remote(batch, key, api_key, batch.round + 1, config)
 
     def _call(
-        self, key: TranslationKey, lines: list[Line], context: list[str], characters: list[Character], config: Config
-    ) -> tuple[list[Result], Usage]:
+        self,
+        key: TranslationKey,
+        lines: list[Line],
+        context: list[str],
+        characters: list[Character],
+        memory: Memory,
+        config: Config,
+    ) -> tuple[list[Result], Usage, list[Term]]:
         """Uma chamada ao motor, com novas tentativas em erros temporários."""
         for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
             try:
                 if key.engine == "openai-text":
                     return llm_openai.translate_text(
-                        lines, context, key.source, key.target, key.model, credentials.get_key(credentials.OPENAI), characters
+                        lines, context, key.source, key.target, key.model, credentials.get_key(credentials.OPENAI), characters, memory,
+                        key.work_id,
                     )
                 if key.engine == "claude-text":
                     return llm_anthropic.translate_text(
-                        lines, context, key.source, key.target, key.model, credentials.get_key(credentials.ANTHROPIC), characters
+                        lines, context, key.source, key.target, key.model, credentials.get_key(credentials.ANTHROPIC), characters, memory
                     )
                 if key.engine == "local":
                     local = replace(config, source_lang=key.source, target_lang=key.target)
-                    return self._pipeline.translate_offline(lines, local), Usage()
-                return translators.translate_google(lines, key.source, key.target), Usage()
+                    return self._pipeline.translate_offline(lines, local), Usage(), []
+                return translators.translate_google(lines, key.source, key.target), Usage(), []
             except TranslationError as exc:
                 if not exc.retryable or delay is None or self._stop.is_set():
                     raise

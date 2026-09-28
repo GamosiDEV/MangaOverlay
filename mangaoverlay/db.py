@@ -135,6 +135,27 @@ _MIGRATIONS = [
     ALTER TABLE lotes ADD COLUMN pausar INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE requisicoes ADD COLUMN enviado TEXT;
     """,
+    # 6: memória da obra. Termos novos entram no glossário como pendentes (ativo = 0) e só passam para a
+    # "foto" usada nos pedidos (ativo = 1) em pontos fixos, para não quebrar o cache de prompt a cada bloco.
+    """
+    CREATE TABLE memoria (
+        obra_id INTEGER PRIMARY KEY REFERENCES obras(id) ON DELETE CASCADE,
+        resumo TEXT NOT NULL DEFAULT '',
+        atualizada_em TEXT
+    );
+    CREATE TABLE glossario (
+        id INTEGER PRIMARY KEY,
+        obra_id INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+        original TEXT NOT NULL,
+        traducao TEXT NOT NULL,
+        nota TEXT NOT NULL DEFAULT '',
+        vezes INTEGER NOT NULL DEFAULT 1,
+        ativo INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (obra_id, original)
+    );
+    ALTER TABLE capitulos ADD COLUMN resumido INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE requisicoes ADD COLUMN sincrona INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -185,6 +206,25 @@ class ChapterTexts:
 
 
 @dataclass(frozen=True)
+class Term:
+    original: str
+    translation: str
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class Memory:
+    """A "foto" da memória que vai nos pedidos: resumo da história e glossário ativo (em ordem fixa)."""
+
+    summary: str
+    glossary: list[Term]
+
+    @property
+    def empty(self) -> bool:
+        return not self.summary and not self.glossary
+
+
+@dataclass(frozen=True)
 class SourceLine:
     """Uma fala de capítulo importado, com a localização (para marcar mudança de página no pedido)."""
 
@@ -218,6 +258,7 @@ class BatchRequest:
     order: int
     state: str
     attempts: int
+    sync: bool = False  # modo híbrido: traduzida na hora, antes do envio à Batch API
 
 
 @dataclass(frozen=True)
@@ -587,8 +628,13 @@ class Database:
         page_ids: list[int],
         estimated_cost: float | None,
         mode: str = "normal",
+        sync_pages: int = 0,
     ) -> int:
-        """Cria o lote e uma requisição pendente para cada bloco de páginas."""
+        """Cria o lote e uma requisição pendente para cada bloco de páginas.
+
+        `sync_pages` (modo híbrido da Batch API): as primeiras páginas formam blocos próprios, traduzidos na hora
+        para montar a memória antes de enviar o resto à OpenAI.
+        """
         with self._lock:
             self._conn.execute("BEGIN")
             cursor = self._conn.execute(
@@ -597,14 +643,18 @@ class Database:
                 (work_id, key.engine, key.model, key.source, key.target, pages_per_block, estimated_cost, mode),
             )
             batch_id = cursor.lastrowid
-            for order, start in enumerate(range(0, len(page_ids), pages_per_block), start=1):
-                request_id = self._conn.execute(
-                    "INSERT INTO requisicoes (lote_id, ordem) VALUES (?, ?)", (batch_id, order)
-                ).lastrowid
-                self._conn.executemany(
-                    "INSERT INTO requisicao_paginas (requisicao_id, pagina_id) VALUES (?, ?)",
-                    [(request_id, page_id) for page_id in page_ids[start : start + pages_per_block]],
-                )
+            groups = [(page_ids[:sync_pages], 1), (page_ids[sync_pages:], 0)] if sync_pages else [(page_ids, 0)]
+            order = 0
+            for pages, sync in groups:
+                for start in range(0, len(pages), pages_per_block):
+                    order += 1
+                    request_id = self._conn.execute(
+                        "INSERT INTO requisicoes (lote_id, ordem, sincrona) VALUES (?, ?, ?)", (batch_id, order, sync)
+                    ).lastrowid
+                    self._conn.executemany(
+                        "INSERT INTO requisicao_paginas (requisicao_id, pagina_id) VALUES (?, ?)",
+                        [(request_id, page_id) for page_id in pages[start : start + pages_per_block]],
+                    )
             self._conn.execute("COMMIT")
         return batch_id
 
@@ -643,10 +693,10 @@ class Database:
         marks = ",".join("?" * len(states))
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT id, ordem, estado, tentativas FROM requisicoes WHERE lote_id = ? AND estado IN ({marks}) ORDER BY ordem",
+                f"SELECT id, ordem, estado, tentativas, sincrona FROM requisicoes WHERE lote_id = ? AND estado IN ({marks}) ORDER BY ordem",
                 (batch_id, *states),
             ).fetchall()
-        return [BatchRequest(*row) for row in rows]
+        return [BatchRequest(*row[:4], bool(row[4])) for row in rows]
 
     def request_lines(self, request_id: int) -> list[SourceLine]:
         with self._lock:
@@ -671,6 +721,15 @@ class Database:
                 (state, error, *usage, cost, request_id),
             )
 
+    def add_request_cost(self, request_id: int, usage: tuple[int, int, int], cost: float) -> None:
+        """Soma um custo extra (ex.: resumo do capítulo) sem mudar o estado da requisição."""
+        with self._lock:
+            self._conn.execute(
+                """UPDATE requisicoes SET tokens_entrada = tokens_entrada + ?, tokens_cache = tokens_cache + ?,
+                   tokens_saida = tokens_saida + ?, custo = custo + ? WHERE id = ?""",
+                (*usage, cost, request_id),
+            )
+
     def set_batch_state(self, batch_id: int, state: str, error: str | None = None) -> None:
         with self._lock:
             self._conn.execute("UPDATE lotes SET estado = ?, erro = ? WHERE id = ?", (state, error, batch_id))
@@ -690,3 +749,92 @@ class Database:
                 (batch_id,),
             ).fetchone()
         return BatchSummary(*(value or 0 for value in row))
+
+    # --- memória da obra ---------------------------------------------------------------
+
+    def memory(self, work_id: int | None) -> Memory:
+        if work_id is None:
+            return Memory("", [])
+        with self._lock:
+            row = self._conn.execute("SELECT resumo FROM memoria WHERE obra_id = ?", (work_id,)).fetchone()
+            terms = self._conn.execute(
+                "SELECT original, traducao, nota FROM glossario WHERE obra_id = ? AND ativo = 1 ORDER BY original",
+                (work_id,),
+            ).fetchall()
+        return Memory(row[0] if row else "", [Term(*t) for t in terms])
+
+    def set_summary(self, work_id: int, summary: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO memoria (obra_id, resumo, atualizada_em) VALUES (?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT (obra_id) DO UPDATE SET resumo = excluded.resumo, atualizada_em = CURRENT_TIMESTAMP""",
+                (work_id, summary),
+            )
+
+    def add_terms(self, work_id: int, terms: list[Term]) -> None:
+        """Termos encontrados pelo modelo: novos entram como pendentes; repetidos só somam ocorrências
+        (a tradução de um termo já na memória não muda, para os capítulos continuarem consistentes)."""
+        rows = [(work_id, t.original.strip(), t.translation.strip(), t.note.strip()) for t in terms if t.original.strip() and t.translation.strip()]
+        if not rows:
+            return
+        with self._lock:
+            self._conn.executemany(
+                """INSERT INTO glossario (obra_id, original, traducao, nota) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (obra_id, original) DO UPDATE SET vezes = vezes + 1""",
+                rows,
+            )
+
+    def pending_terms(self, work_id: int) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM glossario WHERE obra_id = ? AND ativo = 0", (work_id,)
+            ).fetchone()[0]
+
+    def consolidate_terms(self, work_id: int, limit: int) -> int:
+        """Atualiza a foto da memória: os `limit` termos mais frequentes ficam ativos. Retorna quantos entraram."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            before = {r[0] for r in self._conn.execute("SELECT id FROM glossario WHERE obra_id = ? AND ativo = 1", (work_id,))}
+            keep = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT id FROM glossario WHERE obra_id = ? ORDER BY ativo DESC, vezes DESC, id LIMIT ?", (work_id, limit)
+                )
+            ]
+            self._conn.execute("UPDATE glossario SET ativo = 0 WHERE obra_id = ?", (work_id,))
+            self._conn.executemany("UPDATE glossario SET ativo = 1 WHERE id = ?", [(i,) for i in keep])
+            # Pendentes que não couberam deixam de ser pendentes (ficam guardados, fora da foto)
+            self._conn.execute("UPDATE glossario SET ativo = -1 WHERE obra_id = ? AND ativo = 0", (work_id,))
+            self._conn.execute("COMMIT")
+        return len(set(keep) - before)
+
+    def forget_memory(self, work_id: int) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN")
+            self._conn.execute("DELETE FROM memoria WHERE obra_id = ?", (work_id,))
+            self._conn.execute("DELETE FROM glossario WHERE obra_id = ?", (work_id,))
+            self._conn.execute("UPDATE capitulos SET resumido = 0 WHERE obra_id = ?", (work_id,))
+            self._conn.execute("COMMIT")
+
+    def chapters_to_summarize(self, work_id: int, key: "TranslationKey") -> list[tuple[int, str, list[str]]]:
+        """Capítulos já totalmente traduzidos com a chave e ainda não resumidos, em ordem: (id, nome, traduções)."""
+        with self._lock:
+            chapters = self._conn.execute(
+                "SELECT id, nome FROM capitulos WHERE obra_id = ? AND resumido = 0 ORDER BY ordem, nome", (work_id,)
+            ).fetchall()
+        result = []
+        lines = self.chapter_lines([c[0] for c in chapters])
+        for chapter_id, name in chapters:
+            texts = [t for _p, t in lines.get(chapter_id, [])]
+            if not texts:
+                continue
+            found = self.find_translations(key, texts, fuzzy=False)
+            translations = [found.get(normalize(t)) for t in texts]
+            if any(t is None for t in translations):
+                break  # resume em ordem: para no primeiro capítulo incompleto
+            result.append((chapter_id, name, translations))
+        return result
+
+    def mark_summarized(self, chapter_id: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE capitulos SET resumido = 1 WHERE id = ?", (chapter_id,))

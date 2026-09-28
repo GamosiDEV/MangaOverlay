@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .db import Character
+from .db import Character, Memory, Term
 from .languages import AUTO, SOURCES, TARGETS, source_english, target_english
 
 
@@ -137,7 +137,29 @@ def characters_block(characters: list[Character]) -> str:
     )
 
 
-def llm_instructions(source: str, target: str, vision: bool, characters: list[Character] | None = None) -> str:
+def memory_block(memory: Memory | None) -> str:
+    """Memória da obra (resumo e glossário) no formato que vai para o modelo. Ordem fixa: favorece o cache de prompt."""
+    if memory is None or memory.empty:
+        return ""
+    parts = []
+    if memory.summary:
+        parts.append("Story so far (summary of the previous chapters, for context only):\n" + memory.summary)
+    if memory.glossary:
+        terms = "\n".join(f"- {t.original} → {t.translation}" + (f" ({t.note})" if t.note else "") for t in memory.glossary)
+        parts.append("Glossary of this series (always translate these terms exactly like this):\n" + terms)
+    return "\n\n" + "\n\n".join(parts)
+
+
+_NEW_TERMS = (
+    " In `new_terms`, list proper nouns and series-specific terms from these texts (places, groups, techniques, "
+    "titles, catchphrases) that are not yet in the character list or glossary above, with the translation you used "
+    "and, in Portuguese, a short note on what it is; usually it is empty."
+)
+
+
+def llm_instructions(
+    source: str, target: str, vision: bool, characters: list[Character] | None = None, memory: Memory | None = None
+) -> str:
     task = (
         "The user sends a screenshot of a comic page. Each text to translate is marked with a red box and its "
         "number. For every numbered box, transcribe the original text inside it and translate it."
@@ -152,14 +174,15 @@ def llm_instructions(source: str, target: str, vision: bool, characters: list[Ch
         "turn sound effects into equivalent onomatopoeia. Keep each translation short, because it has to fit in "
         "the original speech bubble. The texts are in reading order and belong to the same scene; "
         "the optional context holds the lines of the previous pages. "
-        "Return one item per number, with an empty translation if a box has no readable text."
-    ) + characters_block(characters or [])
+        "Return one item per number, with an empty translation if a box has no readable text." + _NEW_TERMS
+    ) + characters_block(characters or []) + memory_block(memory)
 
 
 def response_schema(vision: bool) -> dict:
     properties = {"id": {"type": "integer"}, "translation": {"type": "string"}}
     if vision:
         properties["original"] = {"type": "string"}
+    term = {"original": {"type": "string"}, "translation": {"type": "string"}, "note": {"type": "string"}}
     return {
         "type": "object",
         "properties": {
@@ -171,11 +194,28 @@ def response_schema(vision: bool) -> dict:
                     "required": list(properties),
                     "additionalProperties": False,
                 },
-            }
+            },
+            "new_terms": {
+                "type": "array",
+                "items": {"type": "object", "properties": term, "required": list(term), "additionalProperties": False},
+            },
         },
-        "required": ["items"],
+        "required": ["items", "new_terms"],
         "additionalProperties": False,
     }
+
+
+def parse_terms(raw: str) -> list[Term]:
+    """Termos novos que o modelo informou (lista vazia se a resposta não trouxer)."""
+    try:
+        items = json.loads(raw).get("new_terms") or []
+    except (ValueError, AttributeError):
+        return []
+    return [
+        Term(str(t.get("original", "")), str(t.get("translation", "")), str(t.get("note", "")))
+        for t in items
+        if isinstance(t, dict)
+    ]
 
 
 def text_request(lines: list[Line], context: list[str]) -> str:

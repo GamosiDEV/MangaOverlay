@@ -30,6 +30,7 @@ from .render import base_font
 from .ui.batchdialog import BatchDialog, BatchWindow
 from .ui.characters import CharactersDialog
 from .ui.icon import app_icon
+from .ui.memorydialog import MemoryDialog
 from .ui.importwindow import ImportWindow
 from .ui.overlay import OverlayWindow
 from .ui.settings import SettingsDialog
@@ -146,6 +147,7 @@ class MangaOverlayApp(QObject):
 
         menu.addSeparator()
         self._characters_action = menu.addAction("Personagens da obra…", self._open_characters)
+        self._memory_action = menu.addAction("Memória da obra…", self._open_memory)
         menu.addAction("Importar capítulos…", self._import_chapters)
         self._batch_action = menu.addAction("Traduzir capítulos…", self._translate_chapters)
         self._batch_resume_action = menu.addAction("", lambda: self._resume_batches(silent=False))
@@ -183,6 +185,7 @@ class MangaOverlayApp(QObject):
         work = self.db.work(c.current_work)
         self._work_menu.setTitle(f"Obra: {work.name if work else 'nenhuma'}")
         self._characters_action.setEnabled(work is not None)
+        self._memory_action.setEnabled(work is not None)
         self._source_menu.setTitle(f"Origem: {source_name(c.source_lang)}")
         self._target_menu.setTitle(f"Destino: {target_name(c.target_lang)}")
         self._engine_menu.setTitle(f"Motor: {ENGINES[c.engine]}")
@@ -214,6 +217,13 @@ class MangaOverlayApp(QObject):
         dialog = CharactersDialog(self.db, work, replace(self.config))
         dialog.setWindowIcon(app_icon())
         dialog.exec()
+
+    def _open_memory(self) -> None:
+        work = self.db.work(self.config.current_work)
+        if work is not None:
+            dialog = MemoryDialog(self.db, work)
+            dialog.setWindowIcon(app_icon())
+            dialog.exec()
 
     # --- importação -----------------------------------------------------------
 
@@ -306,7 +316,7 @@ class MangaOverlayApp(QObject):
         cost = dialog.estimate.cost
         if dialog.mode == "batch" and cost is not None:
             cost *= 0.5
-        self.db.create_batch(work.id, key, pages_per_block, pages, cost, dialog.mode)
+        self.db.create_batch(work.id, key, pages_per_block, pages, cost, dialog.mode, dialog.sync_pages())
         via = " pela Batch API" if dialog.mode == "batch" else ""
         self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
 

@@ -7,8 +7,8 @@ deixe a página sem tradução.
 
 import base64
 
-from .db import Character
-from .translators import Line, Result, TranslationError, Usage, llm_instructions, parse_response, response_schema, text_request
+from .db import Character, Memory, Term
+from .translators import Line, Result, TranslationError, Usage, llm_instructions, parse_response, parse_terms, response_schema, text_request
 
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
@@ -22,7 +22,9 @@ def structured(api_key: str, model: str, system: str, content: list[dict], schem
         response = client.beta.messages.create(
             model=model,
             max_tokens=16000,
-            system=system,
+            # Cache no fim das instruções: instruções + personagens + memória são iguais em todos os pedidos da
+            # obra (a memória só muda em pontos fixos). Prefixos curtos demais não são cacheados, sem erro.
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": content}],
             output_config={
                 "effort": "low",
@@ -60,16 +62,23 @@ def structured(api_key: str, model: str, system: str, content: list[dict], schem
 
 
 def translate_text(
-    lines: list[Line], context: list[str], source: str, target: str, model: str, api_key: str, characters: list[Character] | None = None
-) -> tuple[list[Result], Usage]:
+    lines: list[Line],
+    context: list[str],
+    source: str,
+    target: str,
+    model: str,
+    api_key: str,
+    characters: list[Character] | None = None,
+    memory: Memory | None = None,
+) -> tuple[list[Result], Usage, list[Term]]:
     raw, usage = structured(
         api_key,
         model,
-        llm_instructions(source, target, False, characters),
+        llm_instructions(source, target, False, characters, memory),
         [{"type": "text", "text": text_request(lines, context)}],
         response_schema(False),
     )
-    return parse_response(raw, lines), usage
+    return parse_response(raw, lines), usage, parse_terms(raw)
 
 
 def translate_image(
@@ -81,13 +90,14 @@ def translate_image(
     model: str,
     api_key: str,
     characters: list[Character] | None = None,
-) -> tuple[list[Result], Usage]:
+    memory: Memory | None = None,
+) -> tuple[list[Result], Usage, list[Term]]:
     numbers = ", ".join(str(line.id) for line in lines)
     context_text = "\n".join(context) or "(none)"
     raw, usage = structured(
         api_key,
         model,
-        llm_instructions(source, target, True, characters),
+        llm_instructions(source, target, True, characters, memory),
         [
             {
                 "type": "image",
@@ -97,4 +107,4 @@ def translate_image(
         ],
         response_schema(True),
     )
-    return parse_response(raw, lines), usage
+    return parse_response(raw, lines), usage, parse_terms(raw)

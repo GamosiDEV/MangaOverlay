@@ -64,6 +64,8 @@ class SettingsDialog(QDialog):
         self.include_free.setChecked(config.include_free_text)
         self.use_gpu = QCheckBox("Usar a GPU nos modelos locais (detector, OCR e tradução offline)")
         self.use_gpu.setChecked(config.use_gpu)
+        self.memory_summary = QCheckBox("Memória da obra: resumir a história a cada capítulo traduzido em lote (~US$ 0,001 por capítulo)")
+        self.memory_summary.setChecked(config.memory_summary)
 
         translation = QFormLayout()
         translation.addRow("Motor:", self.engine)
@@ -71,6 +73,7 @@ class SettingsDialog(QDialog):
         translation.addRow("Idioma de destino:", self.target)
         translation.addRow("", self.include_free)
         translation.addRow("", self.use_gpu)
+        translation.addRow("", self.memory_summary)
         translation_box = QGroupBox("Tradução")
         translation_box.setLayout(translation)
 
@@ -161,6 +164,7 @@ class SettingsDialog(QDialog):
             target_lang=self.target.currentData(),
             include_free_text=self.include_free.isChecked(),
             use_gpu=self.use_gpu.isChecked(),
+            memory_summary=self.memory_summary.isChecked(),
             openai_model=self.openai_model.currentText().strip() or OPENAI_MODELS[0],
             claude_model=self.claude_model.currentText().strip() or CLAUDE_MODELS[0],
             font_family="" if self.default_font.isChecked() else self.font_family.currentFont().family(),
