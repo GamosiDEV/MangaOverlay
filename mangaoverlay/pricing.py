@@ -36,13 +36,14 @@ def estimate_tokens(text: str) -> int:
     return wide + (len(text) - wide) // 4 + 1
 
 
-def cost(model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> float | None:
+def cost(model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0, discount: float = 1.0) -> float | None:
+    """Custo em US$; `discount` 0,5 para a Batch API."""
     price = PRICES.get(model)
     if price is None:
         return None
     return (
         (input_tokens - cached_tokens) * price.input + cached_tokens * price.cached_input + output_tokens * price.output
-    ) / 1_000_000
+    ) / 1_000_000 * discount
 
 
 def format_cost(value: float | None) -> str:

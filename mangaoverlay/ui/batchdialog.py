@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -76,6 +77,18 @@ class BatchDialog(QDialog):
         block_row.addWidget(self.block)
         block_row.addWidget(self.block_hint, 1)
 
+        # Modo de envio: normal (na hora) ou Batch API da OpenAI (metade do preço, em até 24 h)
+        self.mode_normal = QRadioButton("Envio normal: traduz agora, bloco a bloco")
+        self.mode_batch = QRadioButton("Batch API da OpenAI: 50% mais barato; a OpenAI processa em segundo plano (em geral minutos, até 24 h)")
+        self.mode_batch.setEnabled(self._key.engine == "openai-text")
+        if not self.mode_batch.isEnabled():
+            self.mode_batch.setToolTip("Disponível só com os motores da OpenAI.")
+        (self.mode_batch if self.mode_batch.isEnabled() and config.batch_mode == "batch" else self.mode_normal).setChecked(True)
+        self.mode_normal.toggled.connect(self._update_estimate)
+        mode_box = QVBoxLayout()
+        mode_box.addWidget(self.mode_normal)
+        mode_box.addWidget(self.mode_batch)
+
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
 
@@ -90,6 +103,7 @@ class BatchDialog(QDialog):
         layout.addWidget(self.chapters, 1)
         layout.addLayout(selection)
         layout.addLayout(block_row)
+        layout.addLayout(mode_box)
         layout.addWidget(self.summary)
         layout.addWidget(self.buttons)
         self.estimate = None
@@ -99,6 +113,10 @@ class BatchDialog(QDialog):
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
         for i in range(self.chapters.count()):
             self.chapters.item(i).setCheckState(state)
+
+    @property
+    def mode(self) -> str:
+        return "batch" if self.mode_batch.isChecked() else "normal"
 
     def selected_chapters(self) -> list[int]:
         return [
@@ -128,7 +146,10 @@ class BatchDialog(QDialog):
         if e.new_lines == 0:
             text = "Tudo o que foi marcado já está traduzido."
         else:
-            cost = pricing.format_cost(e.cost) if llm else "grátis"
+            batch = self.mode == "batch"
+            cost = pricing.format_cost(e.cost * (0.5 if batch else 1.0) if e.cost is not None else None) if llm else "grátis"
+            if batch and e.cost is not None:
+                cost += f" (no envio normal: {pricing.format_cost(e.cost)})"
             text = (
                 f"<b>{e.new_lines} falas a traduzir</b> em {e.requests} pedido(s), de {e.pages} páginas"
                 + (f" ({repeated} já traduzidas ou repetidas não são enviadas)" if repeated else "")

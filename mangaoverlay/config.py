@@ -53,6 +53,8 @@ class Config:
     names_quick_chapters: int = 3
     # Tradução em lote: quantas páginas vão em cada pedido à API
     batch_pages_per_block: int = 20
+    # Último modo escolhido para o lote: "normal" ou "batch" (Batch API da OpenAI)
+    batch_mode: str = "normal"
     names_model_openai: str = "gpt-5.4-nano"
     names_model_claude: str = "claude-haiku-4-5"
     # Usa a GPU (CUDA) para os modelos locais, se houver

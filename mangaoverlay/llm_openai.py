@@ -6,23 +6,48 @@ from .db import Character
 from .translators import Line, Result, TranslationError, Usage, llm_instructions, parse_response, response_schema, text_request
 
 
+def request_body(model: str, instructions: str, input, schema: dict, name: str) -> dict:
+    """Parâmetros da Responses API; o mesmo corpo serve para a chamada normal e para a Batch API."""
+    body = {
+        "model": model,
+        "instructions": instructions,
+        "input": input,
+        "text": {"format": {"type": "json_schema", "name": name, "schema": schema, "strict": True}},
+    }
+    if model.startswith("gpt-5"):
+        # Modelos de raciocínio: o raciocínio é cobrado como saída; tarefa simples, esforço baixo
+        body["reasoning"] = {"effort": "low"}
+    return body
+
+
+def text_body(lines: list[Line], context: list[str], source: str, target: str, model: str, characters: list[Character] | None) -> dict:
+    """Corpo de um pedido de tradução no modo texto (usado pelo lote da Batch API)."""
+    return request_body(
+        model, llm_instructions(source, target, False, characters), text_request(lines, context), response_schema(False), "translations"
+    )
+
+
+def parse_body(body: dict) -> tuple[str, Usage]:
+    """Texto e uso de tokens de uma resposta da Responses API em forma de dicionário (arquivo de resultados do lote)."""
+    text = "".join(
+        part.get("text", "")
+        for item in body.get("output", [])
+        if item.get("type") == "message"
+        for part in item.get("content", [])
+        if part.get("type") == "output_text"
+    )
+    usage = body.get("usage") or {}
+    details = usage.get("input_tokens_details") or {}
+    return text, Usage(usage.get("input_tokens", 0), details.get("cached_tokens", 0) or 0, usage.get("output_tokens", 0))
+
+
 def structured(api_key: str, model: str, instructions: str, input, schema: dict, name: str) -> tuple[str, Usage]:
     """Uma chamada com resposta em JSON garantida pelo schema. Retorna o texto JSON e o uso de tokens."""
     import openai
 
-    kwargs = {}
-    if model.startswith("gpt-5"):
-        # Modelos de raciocínio: o raciocínio é cobrado como saída; tarefa simples, esforço baixo
-        kwargs["reasoning"] = {"effort": "low"}
     client = openai.OpenAI(api_key=api_key, timeout=180)
     try:
-        response = client.responses.create(
-            model=model,
-            instructions=instructions,
-            input=input,
-            text={"format": {"type": "json_schema", "name": name, "schema": schema, "strict": True}},
-            **kwargs,
-        )
+        response = client.responses.create(**request_body(model, instructions, input, schema, name))
     except openai.AuthenticationError as exc:
         raise TranslationError("Chave da API da OpenAI inválida.") from exc
     except openai.NotFoundError as exc:

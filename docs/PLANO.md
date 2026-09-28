@@ -76,13 +76,14 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 ### Fase 5: Batch API da OpenAI
 
-- [ ] Montar o arquivo JSONL com os blocos do lote, enviar e guardar o id do trabalho no banco.
-- [ ] Acompanhar o andamento (ao abrir o app e periodicamente) e notificar quando terminar.
-- [ ] Importar os resultados; reenviar em um novo Batch só os pedidos que falharam.
-- [ ] Modo híbrido: os 1–2 primeiros capítulos em envio normal, para montar a memória da obra, e o resto pela Batch API.
-- [ ] Opção no lote: "Envio normal (mais rápido)" ou "Batch API (50% mais barato, até 24 h)".
+- [x] Montar o arquivo JSONL com os blocos do lote (endpoint `/v1/responses`, o mesmo do envio normal), enviar e guardar o id do trabalho no banco (migração 5).
+- [x] Acompanhar o andamento (ao abrir o app e a cada minuto) e notificar quando terminar.
+- [x] Importar os resultados; falas que o modelo pulou e pedidos que voltaram no arquivo de erros vão num novo envio, só eles (até 2 rodadas extras).
+- [ ] ~~Modo híbrido~~ → movido para a Fase 6: o contexto entre blocos usa só o texto original, que já está no banco antes de qualquer tradução, então os primeiros capítulos em envio normal só fazem sentido quando existir a memória da obra.
+- [x] Opção no lote: "Envio normal (mais rápido)" ou "Batch API (50% mais barato, até 24 h)", com o custo das duas.
+- [x] Pausar cancela o lote na OpenAI guardando o que já voltou; retomar envia só o resto. Lote recusado na validação pausa com o motivo.
 
-**Pronto quando:** enviar 30 capítulos pela Batch API, fechar o app, reabrir mais tarde e encontrar todos traduzidos no banco.
+**Pronto quando:** enviar 30 capítulos pela Batch API, fechar o app, reabrir mais tarde e encontrar todos traduzidos no banco. ✅ Verificado com uma Batch API simulada (esquecimento de fala + pedido no arquivo de erros → 2º envio só com as 9 falas que faltaram; pausa durante o processamento → parcial guardado e retomada; lote recusado → pausa com o motivo) e com um lote real pequeno na OpenAI.
 
 ### Fase 6: Memória da obra
 
@@ -90,6 +91,7 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 - [ ] Resumo da história atualizado a cada capítulo (chamada curta e barata).
 - [ ] A memória vai no início de toda requisição da obra, em ordem fixa, para aproveitar o cache de prompt automático da OpenAI (entrada em cache custa de 10 a 25% do preço normal).
 - [ ] Tamanho da memória limitado (~2.000 tokens), para o custo por página não crescer com o tempo.
+- [ ] Modo híbrido do lote (vindo da Fase 5): traduzir os 1–2 primeiros capítulos em envio normal para montar a memória, e o resto pela Batch API já com ela.
 
 **Pronto quando:** o custo por página de uma obra com 30 capítulos lidos é o mesmo de uma obra nova, e o uso reportado pela API mostra entrada em cache.
 

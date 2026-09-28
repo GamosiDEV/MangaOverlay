@@ -7,6 +7,7 @@ Traduções sem obra escolhida ficam com obra_id NULL ("sem obra").
 O esquema é versionado (PRAGMA user_version): cada fase do plano acrescenta suas tabelas em _MIGRATIONS.
 """
 
+import json
 import sqlite3
 import threading
 import unicodedata
@@ -124,6 +125,16 @@ _MIGRATIONS = [
         PRIMARY KEY (requisicao_id, pagina_id)
     );
     """,
+    # 5: Batch API da OpenAI. O lote remoto é assíncrono (minutos a horas): o id e o estado ficam no banco,
+    # e cada requisição guarda as falas enviadas, para casar as respostas quando voltarem.
+    """
+    ALTER TABLE lotes ADD COLUMN modo TEXT NOT NULL DEFAULT 'normal' CHECK (modo IN ('normal', 'batch'));
+    ALTER TABLE lotes ADD COLUMN lote_remoto TEXT;
+    ALTER TABLE lotes ADD COLUMN estado_remoto TEXT;
+    ALTER TABLE lotes ADD COLUMN rodada INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE lotes ADD COLUMN pausar INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE requisicoes ADD COLUMN enviado TEXT;
+    """,
 ]
 
 
@@ -194,6 +205,11 @@ class Batch:
     state: str
     error: str | None
     estimated_cost: float | None
+    mode: str = "normal"  # "normal" ou "batch" (Batch API da OpenAI)
+    remote_id: str | None = None
+    remote_state: str | None = None
+    round: int = 0  # envios à Batch API já feitos (o 2º e o 3º levam só o que faltou)
+    pause_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -564,15 +580,21 @@ class Database:
         return [row[0] for row in rows]
 
     def create_batch(
-        self, work_id: int, key: TranslationKey, pages_per_block: int, page_ids: list[int], estimated_cost: float | None
+        self,
+        work_id: int,
+        key: TranslationKey,
+        pages_per_block: int,
+        page_ids: list[int],
+        estimated_cost: float | None,
+        mode: str = "normal",
     ) -> int:
         """Cria o lote e uma requisição pendente para cada bloco de páginas."""
         with self._lock:
             self._conn.execute("BEGIN")
             cursor = self._conn.execute(
-                """INSERT INTO lotes (obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, custo_estimado)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (work_id, key.engine, key.model, key.source, key.target, pages_per_block, estimated_cost),
+                """INSERT INTO lotes (obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, custo_estimado, modo)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (work_id, key.engine, key.model, key.source, key.target, pages_per_block, estimated_cost, mode),
             )
             batch_id = cursor.lastrowid
             for order, start in enumerate(range(0, len(page_ids), pages_per_block), start=1):
@@ -591,10 +613,31 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT id, obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, estado, erro,
-                           custo_estimado FROM lotes WHERE estado IN ({marks}) ORDER BY id""",
+                           custo_estimado, modo, lote_remoto, estado_remoto, rodada, pausar
+                    FROM lotes WHERE estado IN ({marks}) ORDER BY id""",
                 states,
             ).fetchall()
-        return [Batch(*row) for row in rows]
+        return [Batch(*row[:14], bool(row[14])) for row in rows]
+
+    def set_remote(self, batch_id: int, remote_id: str | None, remote_state: str | None, round: int | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE lotes SET lote_remoto = ?, estado_remoto = ?, rodada = IFNULL(?, rodada) WHERE id = ?",
+                (remote_id, remote_state, round, batch_id),
+            )
+
+    def request_pause(self, batch_id: int, pause: bool = True) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE lotes SET pausar = ? WHERE id = ?", (int(pause), batch_id))
+
+    def set_sent(self, request_id: int, texts: list[str]) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE requisicoes SET enviado = ? WHERE id = ?", (json.dumps(texts, ensure_ascii=False), request_id))
+
+    def sent(self, request_id: int) -> list[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT enviado FROM requisicoes WHERE id = ?", (request_id,)).fetchone()
+        return json.loads(row[0]) if row and row[0] else []
 
     def batch_requests(self, batch_id: int, states: tuple[str, ...] = ("pendente",)) -> list[BatchRequest]:
         marks = ",".join("?" * len(states))

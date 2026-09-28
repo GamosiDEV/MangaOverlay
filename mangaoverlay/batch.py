@@ -17,11 +17,11 @@ from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QObject, Signal
 
-from . import credentials, llm_anthropic, llm_openai, pricing, translators
+from . import credentials, llm_anthropic, llm_openai, openai_batch, pricing, translators
 from .config import Config
-from .db import Batch, BatchSummary, Character, Database, TranslationKey, normalize
+from .db import Batch, BatchSummary, Character, Database, SourceLine, TranslationKey, normalize
 from .pipeline import Pipeline
-from .translators import Line, MalformedResponse, Result, TranslationError, Usage, llm_instructions
+from .translators import Line, MalformedResponse, Result, TranslationError, Usage, llm_instructions, parse_response
 
 # O lote sempre usa o modo texto: os capítulos importados já têm o texto lido pelo OCR local
 TEXT_ENGINE = {"openai-vision": "openai-text", "claude-vision": "claude-text"}
@@ -174,7 +174,10 @@ class BatchRunner(QObject):
         for batch in self._db.batches(("ativo",)):
             if self._stop.is_set():
                 break
-            self._run_batch(batch, config)
+            if batch.mode == "batch":
+                self._step_remote(batch)
+            else:
+                self._run_batch(batch, config)
 
     def _run_batch(self, batch: Batch, config: Config) -> None:
         key = TranslationKey(batch.work_id, batch.source_lang, batch.target_lang, batch.engine, batch.model)
@@ -229,14 +232,7 @@ class BatchRunner(QObject):
         cost = 0.0
         missing: list = []
         for _round in range(1 + _MISSING_ROUNDS):
-            saved = self._db.find_translations(key, [line.text for line in source_lines], fuzzy=False)
-            # Uma fala por texto (as repetidas usam a mesma tradução), só as que ainda não têm tradução
-            unique: dict[str, object] = {}
-            for line in source_lines:
-                norm = normalize(line.text)
-                if norm and norm not in saved and norm not in unique:
-                    unique[norm] = line
-            missing = list(unique.values())
+            missing = self._missing(key, source_lines)
             if not missing:
                 break
             self._emit(batch, total, f"Bloco {order} de {total}: {len(missing)} fala(s)")
@@ -260,6 +256,129 @@ class BatchRunner(QObject):
         else:
             self._db.record_request(request_id, "concluida", _usage_tuple(usage), cost)
         self._emit(batch, total, f"Bloco {order} de {total} concluído")
+
+    def _missing(self, key: TranslationKey, source_lines: list[SourceLine]) -> list[SourceLine]:
+        """Uma fala por texto (as repetidas usam a mesma tradução), só as que ainda não têm tradução salva."""
+        saved = self._db.find_translations(key, [line.text for line in source_lines], fuzzy=False)
+        unique: dict[str, SourceLine] = {}
+        for line in source_lines:
+            norm = normalize(line.text)
+            if norm and norm not in saved and norm not in unique:
+                unique[norm] = line
+        return list(unique.values())
+
+    # --- Batch API da OpenAI -------------------------------------------------------------
+
+    def _step_remote(self, batch: Batch) -> None:
+        """Uma passada num lote da Batch API: envia (se ainda não enviado) ou confere o andamento.
+
+        O app chama de novo a cada minuto enquanto houver lote esperando a OpenAI.
+        """
+        api_key = credentials.get_key(credentials.OPENAI)
+        if not api_key:
+            self._finish(batch, "pausado", "Chave da API da OpenAI não configurada.")
+            return
+        key = TranslationKey(batch.work_id, batch.source_lang, batch.target_lang, batch.engine, batch.model)
+        try:
+            if batch.remote_id is None:
+                if batch.pause_requested:
+                    self._db.request_pause(batch.id, False)
+                    self._finish(batch, "pausado", None)
+                else:
+                    self._submit_remote(batch, key, api_key, batch.round + 1)
+            else:
+                self._poll_remote(batch, key, api_key)
+        except TranslationError as exc:
+            if exc.retryable:
+                # Sem conexão agora: o lote segue ativo e a próxima passada tenta de novo
+                self.progress.emit(BatchProgress(batch.id, 0, 0, 0, self._db.batch_summary(batch.id).cost, f"{exc} Tentando de novo em 1 minuto."))
+            else:
+                self._finish(batch, "pausado", str(exc))
+
+    def _finish(self, batch: Batch, state: str, error: str | None) -> None:
+        self._db.set_batch_state(batch.id, state, error)
+        self.finished.emit(BatchOutcome(batch.id, state, self._db.batch_summary(batch.id), error))
+
+    def _submit_remote(self, batch: Batch, key: TranslationKey, api_key: str, round: int) -> None:
+        characters = self._db.characters(batch.work_id)
+        all_requests = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
+        payload: dict[str, dict] = {}
+        for request in self._db.batch_requests(batch.id, ("pendente",)):
+            missing = self._missing(key, self._db.request_lines(request.id))
+            if not missing:
+                self._db.record_request(request.id, "concluida", (0, 0, 0), 0.0)
+                continue
+            if round > 1 + _MISSING_ROUNDS:
+                self._db.record_request(
+                    request.id, "falhou", (0, 0, 0), 0.0, f"{len(missing)} fala(s) ficaram sem tradução depois de {round - 1} envios"
+                )
+                continue
+            # Contexto: as falas do bloco anterior (texto original, já conhecido antes de qualquer tradução)
+            previous = [r for r in all_requests if r.order < request.order]
+            context = [line.text for line in self._db.request_lines(previous[-1].id)][-_CONTEXT_LINES:] if previous else []
+            lines = [Line(n, line.text, f"{line.chapter}, p. {line.page}") for n, line in enumerate(missing, start=1)]
+            self._db.set_sent(request.id, [line.text for line in missing])
+            payload[str(request.id)] = llm_openai.text_body(lines, context, key.source, key.target, key.model, characters)
+
+        if not payload:
+            self._db.set_remote(batch.id, None, None, round - 1)
+            self._finish(batch, "concluido", None)
+            return
+        remote_id = openai_batch.submit(api_key, payload)
+        self._db.set_remote(batch.id, remote_id, "validating", round)
+        extra = f" (envio {round}: só as falas que faltaram)" if round > 1 else ""
+        self.progress.emit(
+            BatchProgress(batch.id, 0, len(payload), 0, self._db.batch_summary(batch.id).cost,
+                          f"{len(payload)} pedido(s) enviados à Batch API da OpenAI{extra}. Aguardando a OpenAI processar…")
+        )
+
+    def _poll_remote(self, batch: Batch, key: TranslationKey, api_key: str) -> None:
+        remote = openai_batch.status(api_key, batch.remote_id)
+        self._db.set_remote(batch.id, batch.remote_id, remote.status)
+        if batch.pause_requested and remote.status in ("validating", "in_progress", "finalizing"):
+            # Cancelar devolve o que a OpenAI já fez; o resto fica pendente para quando retomar
+            openai_batch.cancel(api_key, batch.remote_id)
+            remote.status = "cancelling"
+        if remote.status in openai_batch.WAITING:
+            labels = {"validating": "validando o arquivo", "in_progress": "processando", "finalizing": "finalizando", "cancelling": "cancelando"}
+            self.progress.emit(
+                BatchProgress(batch.id, remote.completed + remote.failed, remote.total, remote.failed,
+                              self._db.batch_summary(batch.id).cost, f"OpenAI {labels[remote.status]}: {remote.completed} de {remote.total} pedido(s) prontos")
+            )
+            return
+        if remote.status == "failed":
+            self._db.set_remote(batch.id, None, None)
+            self._finish(batch, "pausado", "A OpenAI recusou o lote: " + ("; ".join(remote.errors) or "sem detalhes"))
+            return
+
+        # Concluído, expirado ou cancelado: grava o que voltou
+        for item in openai_batch.download(api_key, remote.output_file_id):
+            request_id = int(item["custom_id"])
+            response = item.get("response") or {}
+            if response.get("status_code") != 200:
+                error = (response.get("body") or {}).get("error", {}).get("message", "erro desconhecido")
+                self._db.record_request(request_id, "pendente", (0, 0, 0), 0.0, error)
+                continue
+            text, usage = llm_openai.parse_body(response.get("body") or {})
+            sent = self._db.sent(request_id)
+            try:
+                results = parse_response(text, [Line(n, t) for n, t in enumerate(sent, start=1)])
+            except MalformedResponse:
+                results = []  # as falas continuam faltando e vão no próximo envio
+            self._db.save_translations(key, [(sent[r.id - 1], r.translation) for r in results if r.translation])
+            cost = pricing.cost(key.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, openai_batch.DISCOUNT) or 0.0
+            self._db.record_request(request_id, "pendente", _usage_tuple(usage), cost)
+        for item in openai_batch.download(api_key, remote.error_file_id):
+            error = (item.get("error") or {}).get("message", "erro desconhecido")
+            self._db.record_request(int(item["custom_id"]), "pendente", (0, 0, 0), 0.0, error)
+        self._db.set_remote(batch.id, None, None)
+
+        if batch.pause_requested:
+            self._db.request_pause(batch.id, False)
+            self._finish(batch, "pausado", None)
+            return
+        # Marca o que ficou completo e reenvia só as falas que faltaram (até 2 rodadas extras)
+        self._submit_remote(batch, key, api_key, batch.round + 1)
 
     def _call(
         self, key: TranslationKey, lines: list[Line], context: list[str], characters: list[Character], config: Config

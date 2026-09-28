@@ -60,6 +60,8 @@ Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continu
 - Erros temporários (limite de requisições, servidor, rede) são tentados de novo sozinhos; se persistirem, o lote pausa em vez de desperdiçar pedidos. Erros definitivos (chave inválida, sem crédito) pausam com a mensagem. Falas que o modelo esquecer de devolver são pedidas de novo, só elas.
 - Fechar o app no meio não perde nada: o lote continua sozinho ao abrir de novo. "Pausar" deixa o lote parado até "Retomar tradução em lote" no menu (que também tenta de novo os blocos que falharam).
 
+**Batch API da OpenAI:** com os motores da OpenAI, a tela oferece "Batch API" como modo de envio, com **50% de desconto**. O app envia todos os pedidos de uma vez e a OpenAI processa em segundo plano (em geral em minutos, com garantia de até 24 horas). Pode fechar o app ou desligar o computador: o id do lote fica no banco e o app confere o andamento a cada minuto quando está aberto. Quando termina, as traduções são gravadas e, se o modelo tiver pulado alguma fala, um novo envio leva só as que faltaram (até 2 vezes). "Pausar" cancela o lote na OpenAI guardando o que já tinha voltado; "Retomar" envia só o resto.
+
 O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: OpenAI, Claude, NLLB offline (grátis) e Google gratuito. Na leitura, qualquer tradução já paga com IA da obra é usada, mesmo que você esteja lendo com outro motor ou modelo.
 
 ## Personagens da obra

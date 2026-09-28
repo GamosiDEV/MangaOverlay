@@ -91,7 +91,12 @@ class MangaOverlayApp(QObject):
         self.batch_runner = BatchRunner(self.db, self.pipeline, self)
         self._batch_window = BatchWindow()
         self._batch_window.setWindowIcon(app_icon())
-        self._batch_window.pause_requested.connect(self.batch_runner.pause)
+        self._batch_window.pause_requested.connect(self._pause_batches)
+        # Lotes da Batch API esperam a OpenAI (minutos a horas): confere o andamento a cada minuto
+        self._batch_poll = QTimer(self)
+        self._batch_poll.setInterval(60_000)
+        self._batch_poll.timeout.connect(self._poll_remote_batches)
+        self._batch_poll.start()
         self.batch_runner.progress.connect(self._batch_window.update_progress)
         self.batch_runner.finished.connect(self._on_batch_finished)
 
@@ -294,12 +299,16 @@ class MangaOverlayApp(QObject):
         if dialog.exec() != BatchDialog.DialogCode.Accepted or dialog.estimate is None:
             return
         pages_per_block = dialog.block.value()
-        if pages_per_block != self.config.batch_pages_per_block:
-            self._update_config(batch_pages_per_block=pages_per_block)
+        if pages_per_block != self.config.batch_pages_per_block or dialog.mode != self.config.batch_mode:
+            self._update_config(batch_pages_per_block=pages_per_block, batch_mode=dialog.mode)
         key = batch_key(self.config, work.id, work.source_lang)
         pages = self.db.chapter_pages(dialog.selected_chapters())
-        self.db.create_batch(work.id, key, pages_per_block, pages, dialog.estimate.cost)
-        self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}…")
+        cost = dialog.estimate.cost
+        if dialog.mode == "batch" and cost is not None:
+            cost *= 0.5
+        self.db.create_batch(work.id, key, pages_per_block, pages, cost, dialog.mode)
+        via = " pela Batch API" if dialog.mode == "batch" else ""
+        self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
 
     def _resumable_batches(self):
         """Lotes pausados e lotes concluídos com blocos que falharam."""
@@ -321,6 +330,23 @@ class MangaOverlayApp(QObject):
                 self._notify(f"Retomando a tradução em lote ({len(active)} lote(s)).", 5000)
         else:
             self._start_batches("Retomando a tradução em lote…")
+
+    def _pause_batches(self) -> None:
+        """Pausa o envio normal na hora; lotes da Batch API são cancelados na OpenAI na próxima verificação
+        (o que já tinha voltado é guardado; o resto fica pendente para quando retomar)."""
+        remote = [b for b in self.db.batches(("ativo",)) if b.mode == "batch"]
+        for batch in remote:
+            self.db.request_pause(batch.id)
+        if self.batch_runner.running:
+            self.batch_runner.pause()
+        elif remote:
+            self.batch_runner.start(self.config)
+
+    def _poll_remote_batches(self) -> None:
+        if self.batch_runner.running:
+            return
+        if any(b.mode == "batch" for b in self.db.batches(("ativo",))):
+            self.batch_runner.start(self.config)
 
     def _start_batches(self, title: str) -> None:
         if self.batch_runner.start(self.config):
