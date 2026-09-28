@@ -26,6 +26,7 @@ class ImportProgress:
     texts: int  # falas lidas até agora
     errors: int
     seconds_left: float | None
+    blank: int = 0
 
 
 @dataclass
@@ -34,6 +35,7 @@ class ImportSummary:
     texts: int
     errors: int
     cancelled: bool
+    blank: int = 0  # páginas em branco (arquivo de prévia, páginas separadoras)
 
 
 class Importer(QObject):
@@ -70,7 +72,7 @@ class Importer(QObject):
 
     def _run(self, config: Config) -> None:
         pages = self._db.pending_pages()
-        total, texts, errors = len(pages), 0, 0
+        total, texts, errors, blank = len(pages), 0, 0, 0
         started = time.perf_counter()
         done = 0
         for done, page in enumerate(pages, start=1):
@@ -79,15 +81,29 @@ class Importer(QObject):
                 break
             try:
                 image = load_page(page.origin, page.file)
-                # Cada obra usa o próprio idioma de origem
-                regions = self._pipeline.read_page(image, replace(config, source_lang=page.source_lang))
+                if _is_blank(image):
+                    self._db.mark_page_blank(page.id)
+                    blank += 1
+                    regions = None
+                else:
+                    # Cada obra usa o próprio idioma de origem
+                    regions = self._pipeline.read_page(image, replace(config, source_lang=page.source_lang))
             except Exception as exc:  # arquivo movido/corrompido, falha no modelo: marca e segue para a próxima
                 self._db.mark_page_error(page.id, str(exc) or exc.__class__.__name__)
                 errors += 1
             else:
-                self._db.save_page_texts(page.id, regions)
-                texts += len(regions)
+                if regions is not None:
+                    self._db.save_page_texts(page.id, regions)
+                    texts += len(regions)
             elapsed = time.perf_counter() - started
             seconds_left = elapsed / done * (total - done) if done >= 3 else None
-            self.progress.emit(ImportProgress(done, total, page.chapter, page.number, texts, errors, seconds_left))
-        self.finished.emit(ImportSummary(done, texts, errors, cancelled=self._stop.is_set()))
+            self.progress.emit(ImportProgress(done, total, page.chapter, page.number, texts, errors, seconds_left, blank))
+        self.finished.emit(ImportSummary(done, texts, errors, cancelled=self._stop.is_set(), blank=blank))
+
+
+def _is_blank(image) -> bool:
+    """Página de uma cor só (sem desenho nem texto): não vale rodar o detector nem o OCR."""
+    import numpy as np
+
+    small = np.asarray(image.convert("L").resize((200, 280)), dtype=np.float32)
+    return float(small.std()) < 2.0

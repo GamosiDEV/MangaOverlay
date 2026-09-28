@@ -39,6 +39,8 @@ class Config:
     # Obra que está sendo lida (id no banco); None = sem obra
     current_work: int | None = None
     target_lang: str = "pt"
+    # Só mostra traduções já salvas no banco; nunca chama tradutor nem API
+    saved_only: bool = False
     # Traduz também textos fora dos balões (narração, onomatopeias). Desligado por padrão porque
     # o detector confunde esses textos com os de menus e sites.
     include_free_text: bool = False

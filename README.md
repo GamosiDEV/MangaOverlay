@@ -34,6 +34,8 @@ Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s na RTX 5050 c
 
 No menu da bandeja, **Obra** escolhe o mangá que você está lendo (ou cria um novo). Cada obra guarda as próprias traduções e lembra o idioma de origem. Toda tradução fica salva em disco: voltar a uma página, mesmo depois de fechar o app, mostra a tradução na hora e não gera nova cobrança na API. Com "Nenhuma", as traduções também ficam salvas, sem obra associada.
 
+**Só traduções salvas:** marcando "Só traduções salvas (nunca traduzir de novo)" no menu, o atalho de traduzir mostra apenas o que já está no banco (de qualquer motor ou modelo) e nunca chama tradutor nem API. Falas sem tradução salva ficam com o original visível e um contorno laranja tracejado; uma notificação diz quantas vieram do banco e quantas faltam.
+
 "Esquecer as traduções desta obra…" apaga as traduções salvas da obra atual (pede confirmação).
 
 A busca no banco é primeiro pelo texto exato e, se não achar, por semelhança (80% ou mais, em falas com 4 caracteres ou mais), porque o OCR às vezes lê um risco do desenho como um caractere a mais.

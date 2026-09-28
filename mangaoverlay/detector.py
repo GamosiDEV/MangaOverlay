@@ -14,6 +14,9 @@ Box = tuple[int, int, int, int]  # x0, y0, x1, y1 (pixels da imagem)
 
 # Balões de mangá passam de 0,9; elementos de interface (botões, cartões) confundidos com balões ficam abaixo de 0,8.
 _THRESHOLDS = {"bubble": 0.8, "text_bubble": 0.35, "text_free": 0.6}
+# Arquivos importados (a imagem inteira é a página: não há menus nem sites para confundir): limiares baixos,
+# textos soltos e texto sem balão confiável em volta. Medido num volume real: ~18% mais falas capturadas.
+_FILE_THRESHOLDS = {"bubble": 0.3, "text_bubble": 0.2, "text_free": 0.2}
 # Recuo do retângulo inscrito numa elipse (1 - 1/√2) / 2 ≈ 0,146
 _BUBBLE_INSET = 0.16
 
@@ -23,6 +26,7 @@ class Region:
     text_box: Box  # onde está o texto original (é coberto)
     area: Box  # onde a tradução pode ser escrita
     bubble: Box | None  # contorno do balão, quando o texto está dentro de um
+    score: float = 1.0  # confiança do detector (perfil de arquivo: decide a segunda leitura em japonês)
 
 
 @dataclass
@@ -75,7 +79,8 @@ class Detector:
         self.model = RTDetrV2ForObjectDetection.from_pretrained(MODEL_ID).to(device).eval()
         self.labels = self.model.config.id2label
 
-    def _raw_detect(self, image: Image.Image) -> list[tuple[str, float, Box]]:
+    def _raw_detect(self, image: Image.Image, thresholds: dict[str, float] | None = None) -> list[tuple[str, float, Box]]:
+        thresholds = thresholds or _THRESHOLDS
         torch = self._torch
         width, height = image.size
         tiles = _tiles(width, height)
@@ -100,7 +105,7 @@ class Detector:
             for score, label, box in zip(result["scores"], result["labels"], result["boxes"]):
                 name = self.labels[int(label)]
                 score = float(score)
-                if score < _THRESHOLDS.get(name, 0.5):
+                if score < thresholds.get(name, 0.5):
                     continue
                 x0, y0, x1, y1 = (float(v) for v in box)
                 # Caixas cortadas pela borda interna de um pedaço aparecem inteiras no vizinho
@@ -128,7 +133,11 @@ class Detector:
         keep = batched_nms(boxes, scores, classes, iou_threshold=0.4)
         return [detections[i] for i in keep.tolist()]
 
-    def detect(self, image: Image.Image, include_free_text: bool = True) -> Detection:
+    def detect(self, image: Image.Image, include_free_text: bool = True, profile: str = "screen") -> Detection:
+        """`profile`: "screen" (captura da tela, com filtros contra textos de menus e sites) ou "file"
+        (página de arquivo importado: aceita tudo o que o modelo enxergar como texto)."""
+        if profile == "file":
+            return self._detect_file(image)
         detections = self._raw_detect(image)
         bubbles = [box for name, _, box in detections if name == "bubble"]
         texts = [box for name, _, box in detections if name == "text_bubble"]
@@ -160,11 +169,43 @@ class Detector:
                 if left - margin <= (t[0] + t[2]) / 2 <= right + margin and not any(_contains_center(b, t) for b in bubbles)
             ]
 
-        width, height = image.size
+        return Detection(self._clip(regions, image.size), bubbles)
+
+    def _detect_file(self, image: Image.Image) -> Detection:
+        # Limiares baixos: o OCR depois descarta o que não for texto legível
+        detections = self._raw_detect(image, _FILE_THRESHOLDS)
+        bubbles = [box for name, _, box in detections if name == "bubble"]
+        grouped: dict[int, tuple[Box, float]] = {}
+        regions = []
+        for name, score, box in detections:
+            if name == "text_bubble":
+                owners = [i for i, b in enumerate(bubbles) if _contains_center(b, box)]
+                if owners:
+                    owner = min(owners, key=lambda i: _area(bubbles[i]))
+                    if owner in grouped:
+                        previous, previous_score = grouped[owner]
+                        grouped[owner] = (_union(previous, box), max(previous_score, score))
+                    else:
+                        grouped[owner] = (box, score)
+                else:
+                    # Balão de formato incomum (grito, pensamento) que o modelo não reconheceu: fica mesmo assim
+                    regions.append(Region(text_box=box, area=_inset(box, -0.1), bubble=None, score=score))
+            elif name == "text_free" and not any(_contains_center(b, box) for b in bubbles):
+                # Narração, onomatopeias, placas e textos do cenário fora dos balões
+                regions.append(Region(text_box=box, area=box, bubble=None, score=score))
+        regions = [
+            Region(text_box=text, area=_union(_inset(bubbles[i], _BUBBLE_INSET), text), bubble=bubbles[i], score=score)
+            for i, (text, score) in grouped.items()
+        ] + regions
+        return Detection(self._clip(regions, image.size), bubbles)
+
+    @staticmethod
+    def _clip(regions: list[Region], size: tuple[int, int]) -> list[Region]:
+        width, height = size
         clipped = []
         for r in regions:
             clip = lambda b: (max(0, b[0]), max(0, b[1]), min(width, b[2]), min(height, b[3]))  # noqa: E731
             text_box, area = clip(r.text_box), clip(r.area)
             if _area(text_box) >= 64:
-                clipped.append(Region(text_box, area, r.bubble))
-        return Detection(clipped, bubbles)
+                clipped.append(Region(text_box, area, r.bubble, r.score))
+        return clipped

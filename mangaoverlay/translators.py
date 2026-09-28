@@ -118,7 +118,10 @@ class NllbTranslator:
 def _source_clause(source: str) -> str:
     if source == AUTO:
         return "The source language may be Japanese, Korean, Chinese or English; detect it"
-    return f"The source language is {source_english(source)}"
+    return (
+        f"The source language is {source_english(source)}; a few texts may be in another language (for example "
+        "Japanese left in the artwork of a translated edition): translate those too"
+    )
 
 
 def characters_block(characters: list[Character]) -> str:

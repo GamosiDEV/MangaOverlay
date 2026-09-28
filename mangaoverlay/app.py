@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot
 from .config import ENGINES, Config
@@ -32,6 +32,7 @@ from .ui.characters import CharactersDialog
 from .ui.icon import app_icon
 from .ui.memorydialog import MemoryDialog
 from .ui.namereview import NameReviewDialog
+from .ui.works import NewWorkDialog, WorksDialog
 from .ui.importwindow import ImportWindow
 from .ui.overlay import OverlayWindow
 from .ui.settings import SettingsDialog
@@ -135,10 +136,14 @@ class MangaOverlayApp(QObject):
         self._colorize_toggle = menu.addAction("Colorir junto com a tradução")
         self._colorize_toggle.setCheckable(True)
         self._colorize_toggle.toggled.connect(lambda on: on != self.config.colorize and self._update_config(colorize=on))
+        self._saved_only_toggle = menu.addAction("Só traduções salvas (nunca traduzir de novo)")
+        self._saved_only_toggle.setCheckable(True)
+        self._saved_only_toggle.toggled.connect(lambda on: on != self.config.saved_only and self._update_config(saved_only=on))
         menu.addSeparator()
 
         self._work_menu = menu.addMenu("")
         self._work_menu.aboutToShow.connect(self._fill_work_menu)
+        menu.addAction("Obras e capítulos…", self._open_works)
         self._source_menu = menu.addMenu("")
         self._source_group = self._choice_actions(self._source_menu, [(source_name(c), c) for c in [*SOURCES, AUTO]], "source_lang")
         self._target_menu = menu.addMenu("")
@@ -184,8 +189,12 @@ class MangaOverlayApp(QObject):
         self._colorize_action.setText(f"Colorir a tela{hint(c.hotkey_colorize)}")
         self._hide_action.setText(f"Esconder{hint(c.hotkey_hide)}")
         self._colorize_toggle.setChecked(c.colorize)
+        self._saved_only_toggle.setChecked(c.saved_only)
         work = self.db.work(c.current_work)
         self._work_menu.setTitle(f"Obra: {work.name if work else 'nenhuma'}")
+        # Submenu sempre preenchido: o Qt não abre submenus vazios, então montá-lo só no aboutToShow
+        # deixava "Nova obra…" inacessível. Adiado para não apagar itens no meio do clique de um deles.
+        QTimer.singleShot(0, self._fill_work_menu)
         self._characters_action.setEnabled(work is not None)
         self._memory_action.setEnabled(work is not None)
         self._names_action.setEnabled(work is not None)
@@ -425,11 +434,29 @@ class MangaOverlayApp(QObject):
             # Cada obra lembra o próprio idioma de origem
             self._update_config(current_work=work.id, source_lang=work.source_lang)
 
+    def _open_works(self) -> None:
+        dialog = WorksDialog(
+            self.db, self.config.current_work, self.config.source_lang, self._select_work, self._busy_reason,
+            lambda: self._resume_import(silent=False),
+        )
+        dialog.setWindowIcon(app_icon())
+        dialog.exec()
+        self._refresh_menu()
+
+    def _busy_reason(self) -> str | None:
+        """Excluir obras/capítulos no meio de uma importação ou de um lote quebraria o trabalho em andamento."""
+        if self.importer.running:
+            return "Há uma importação em andamento."
+        if self.batch_runner.running or self.db.batches(("ativo",)):
+            return "Há uma tradução em lote em andamento."
+        return None
+
     def _new_work(self) -> None:
-        name, ok = QInputDialog.getText(None, APP_DISPLAY_NAME, "Nome do mangá que você vai ler:")
-        if not ok or not name.strip():
+        dialog = NewWorkDialog(self.config.source_lang)
+        dialog.setWindowIcon(app_icon())
+        if dialog.exec() != NewWorkDialog.DialogCode.Accepted:
             return
-        work = self.db.create_work(name, self.config.source_lang)
+        work = self.db.create_work(dialog.name.text(), dialog.language.currentData())
         self._select_work(work)
         self._notify(f"Lendo agora: {work.name} ({source_name(work.source_lang)}).", 4000)
 
@@ -601,6 +628,13 @@ class MangaOverlayApp(QObject):
                 overlay.show_result(result, size, font)
                 texts += len(result.items)
                 pages += result.color_image is not None
+        if translate and self.config.saved_only:
+            found = sum(1 for _r, (result, _s) in results.items() for i in result.items if not i.missing)
+            lacking = sum(1 for _r, (result, _s) in results.items() for i in result.items if i.missing)
+            if found or lacking:
+                extra = f"; {lacking} sem tradução salva (contorno laranja)" if lacking else ""
+                self._notify(f"Só traduções salvas: {found} fala(s) do banco{extra}.", 4000)
+                return
         if colorize and pages == 0:
             self._notify("Nenhuma página de mangá encontrada na tela para colorir (a página precisa ter balões).", 5000)
         elif translate and not colorize and texts == 0:

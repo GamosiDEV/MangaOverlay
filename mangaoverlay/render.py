@@ -1,7 +1,7 @@
 """Desenho das traduções: cobre o texto original e encaixa a tradução no balão, no maior tamanho que couber."""
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 
 from .pipeline import OverlayItem
 
@@ -45,6 +45,13 @@ def paint_items(painter: QPainter, items: list[OverlayItem], font: QFont) -> Non
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     for item in items:
+        if item.missing:
+            # Sem tradução salva: o original fica visível, com um contorno tracejado laranja
+            pen = QPen(QColor(240, 140, 0, 230), 3, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(_rect(item.fill), 6, 6)
+            continue
         background = QColor(*item.background)
         dark = background.lightness() < 110
         foreground = QColor("white") if dark else QColor(20, 20, 20)

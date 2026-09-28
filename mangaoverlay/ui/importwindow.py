@@ -55,6 +55,8 @@ class ImportWindow(QWidget):
         parts = [f"{progress.texts} falas lidas"]
         if progress.errors:
             parts.append(f"{progress.errors} página(s) com erro")
+        if progress.blank:
+            parts.append(f"{progress.blank} em branco")
         if progress.seconds_left is not None:
             parts.append(f"faltam ~{_duration(progress.seconds_left)}")
         self._details.setText(" · ".join(parts))
@@ -67,9 +69,16 @@ class ImportWindow(QWidget):
         else:
             self._bar.setValue(self._bar.maximum())
             self._title.setText(f"Importação concluída: {summary.pages} página(s), {summary.texts} falas lidas.")
-            self._details.setText(
-                f"{summary.errors} página(s) com erro (arquivo movido ou corrompido)." if summary.errors else ""
-            )
+            notes = []
+            if summary.blank:
+                notes.append(
+                    f"{summary.blank} página(s) em branco, sem nada para ler"
+                    + (" (o arquivo parece ser uma prévia: a maior parte das páginas está vazia)" if summary.blank > summary.pages / 2 else "")
+                    + "."
+                )
+            if summary.errors:
+                notes.append(f"{summary.errors} página(s) com erro (arquivo movido ou corrompido).")
+            self._details.setText(" ".join(notes))
         self._button.setText("Fechar")
         self._button.setEnabled(True)
 

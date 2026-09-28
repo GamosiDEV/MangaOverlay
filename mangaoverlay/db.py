@@ -337,6 +337,37 @@ class Database:
             row = self._conn.execute("SELECT id, nome, idioma_origem FROM obras WHERE nome = ?", (name,)).fetchone()
         return Work(*row)
 
+    def rename_work(self, work_id: int, name: str) -> bool:
+        """False se já existir outra obra com esse nome."""
+        try:
+            with self._lock:
+                self._conn.execute("UPDATE obras SET nome = ? WHERE id = ?", (name.strip(), work_id))
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def delete_work(self, work_id: int) -> None:
+        """Apaga a obra e tudo dela: capítulos, textos lidos, traduções, personagens, memória e lotes."""
+        with self._lock:
+            self._conn.execute("DELETE FROM obras WHERE id = ?", (work_id,))
+
+    def work_stats(self, work_id: int) -> tuple[int, int, int]:
+        """(capítulos, páginas, traduções salvas) da obra."""
+        with self._lock:
+            chapters, pages = self._conn.execute(
+                """SELECT COUNT(DISTINCT c.id), COUNT(p.id) FROM capitulos c
+                   LEFT JOIN paginas p ON p.capitulo_id = c.id WHERE c.obra_id = ?""",
+                (work_id,),
+            ).fetchone()
+            translations = self._conn.execute("SELECT COUNT(*) FROM traducoes WHERE obra_id = ?", (work_id,)).fetchone()[0]
+        return chapters, pages, translations
+
+    def delete_chapters(self, chapter_ids: list[int]) -> None:
+        """Apaga capítulos importados (páginas e textos lidos). As traduções continuam salvas: elas são
+        guardadas pelo texto e podem servir a outros capítulos ou à leitura pela tela."""
+        with self._lock:
+            self._conn.executemany("DELETE FROM capitulos WHERE id = ?", [(i,) for i in chapter_ids])
+
     def set_work_language(self, work_id: int, source_lang: str) -> None:
         with self._lock:
             self._conn.execute("UPDATE obras SET idioma_origem = ? WHERE id = ?", (source_lang, work_id))
@@ -500,6 +531,30 @@ class Database:
             )
             self._conn.execute("UPDATE paginas SET estado = 'lida', erro = NULL WHERE id = ?", (page_id,))
             self._conn.execute("COMMIT")
+
+    def mark_page_blank(self, page_id: int) -> None:
+        """Página sem conteúdo (ex.: páginas vazias de arquivos de prévia): lida, sem falas, com a marca."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            self._conn.execute("DELETE FROM regioes WHERE pagina_id = ?", (page_id,))
+            self._conn.execute("UPDATE paginas SET estado = 'lida', erro = 'em branco' WHERE id = ?", (page_id,))
+            self._conn.execute("COMMIT")
+
+    def reset_chapters(self, chapter_ids: list[int]) -> int:
+        """Volta as páginas dos capítulos para pendentes, para serem lidas de novo (as traduções continuam salvas)."""
+        with self._lock:
+            cursor = self._conn.executemany(
+                "UPDATE paginas SET estado = 'pendente', erro = NULL WHERE capitulo_id = ?", [(i,) for i in chapter_ids]
+            )
+        return cursor.rowcount
+
+    def blank_pages(self, work_id: int) -> int:
+        with self._lock:
+            return self._conn.execute(
+                """SELECT COUNT(*) FROM paginas p JOIN capitulos c ON c.id = p.capitulo_id
+                   WHERE c.obra_id = ? AND p.erro = 'em branco'""",
+                (work_id,),
+            ).fetchone()[0]
 
     def mark_page_error(self, page_id: int, message: str) -> None:
         with self._lock:

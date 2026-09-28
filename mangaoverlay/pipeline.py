@@ -12,13 +12,18 @@ from PIL import Image
 
 from . import credentials, llm_anthropic, llm_openai, translators
 from .colorize import Colorizer, find_page
-from .config import VISION_ENGINES, Config
+from .config import ENGINES, VISION_ENGINES, Config
 from .db import Database, TranslationKey, normalize
 from .memory import GLOSSARY_LIMIT, SCREEN_CONSOLIDATE_EVERY
 from .detector import Box, Detector, Region
 from .languages import AUTO, looks_like
 from .ocr import OcrEngine
 from .translators import Line, Result
+
+
+ALL_ENGINES = tuple(ENGINES)
+# Confiança mínima do detector para tentar ler em japonês uma caixa que o leitor do idioma da obra não leu
+_SECOND_LANGUAGE_MIN_SCORE = 0.45
 
 
 class PipelineError(Exception):
@@ -33,6 +38,7 @@ class OverlayItem:
     original: str
     background: tuple[int, int, int]
     bubble: Box | None  # a cobertura não passa do interior do balão (não apaga o contorno)
+    missing: bool = False  # modo "só traduções salvas": fala sem tradução no banco (original fica visível, marcado)
 
 
 def _dhash(image: Image.Image) -> int:
@@ -222,11 +228,17 @@ class Pipeline:
             for index in missing:
                 if index in new:
                     results[index] = new[index]
-                    self._cache.put(key, signatures[index], new[index])
+                    # "Sem tradução salva" não vai para o cache: ao desligar o modo, a fala precisa ser traduzida
+                    if new[index].translation:
+                        self._cache.put(key, signatures[index], new[index])
 
         items = []
         for index, region in enumerate(regions):
             result = results.get(index)
+            if config.saved_only and result is not None and not result.translation:
+                box = _expand(region.text_box, image.size)
+                items.append(OverlayItem(box, region.area, "", result.original, (255, 255, 255), region.bubble, missing=True))
+                continue
             # Tradução igual ao original: já estava no idioma de destino (ex.: botões de um site em português)
             if result is None or not result.translation or result.translation.casefold() == result.original.casefold():
                 continue
@@ -255,6 +267,11 @@ class Pipeline:
         """Tradução das regiões `indices`: banco primeiro (pelo texto lido), tradutor só para o que falta."""
         source = config.source_lang
         if source == AUTO:
+            if config.saved_only:
+                raise PipelineError(
+                    "O modo “só traduções salvas” precisa do idioma de origem definido (com “Detectar” não dá para "
+                    "procurar no banco). Escolha a origem no menu da bandeja."
+                )
             # Sem idioma definido não há OCR local, logo nem chave para o banco: o LLM lê a imagem direto.
             return self._call_translator(image, regions, [(i, "") for i in indices], config)
 
@@ -269,7 +286,9 @@ class Pipeline:
         if self._db is not None:
             # Se o motor atual ainda não traduziu, aceita qualquer tradução já paga com IA (ex.: lote feito com
             # outro modelo, ou leitura no modo visão/NLLB de uma obra traduzida em lote no modo texto)
-            saved = self._db.find_translations(key, [text for _i, text in readable], also_engines=("openai-text", "claude-text"))
+            # No modo "só traduções salvas" vale qualquer tradução guardada da obra, de qualquer motor
+            engines = ALL_ENGINES if config.saved_only else ("openai-text", "claude-text")
+            saved = self._db.find_translations(key, [text for _i, text in readable], also_engines=engines)
             pending = []
             for index, text in readable:
                 translation = saved.get(normalize(text))
@@ -278,6 +297,10 @@ class Pipeline:
                 else:
                     pending.append((index, text))
 
+        if pending and config.saved_only:
+            # Nunca traduz: o que não está no banco volta sem tradução (e é marcado na tela)
+            results.update({index: Result(0, text, "") for index, text in pending})
+            return results
         if pending:
             new = self._call_translator(image, regions, pending, config, status)
             results.update(new)
@@ -288,17 +311,33 @@ class Pipeline:
             self._context.extend(r.original for _i, r in sorted(new.items()) if r.original)
         return results
 
-    def _read(self, crops: list[Image.Image], indices: list[int], source: str) -> list[tuple[int, str]]:
+    def _read(
+        self, crops: list[Image.Image], indices: list[int], source: str, screen: bool = True, scores: list[float] | None = None
+    ) -> list[tuple[int, str]]:
         """OCR das regiões `indices`, descartando leituras incertas ou sem a escrita do idioma de origem
-        (lixo, textos da interface do sistema). Retorna (índice, texto) na mesma ordem."""
+        (lixo, textos da interface do sistema). Retorna (índice, texto) na mesma ordem.
+
+        `screen=False` (arquivo importado): sem o filtro de texto latino, que existe para botões e legendas de
+        sites; num arquivo ele só descartaria balões japoneses com palavras em inglês."""
         if self._ocr is None:
             raise PipelineError("OCR não carregado.")
         readings = self._ocr.read([crops[i] for i in indices], source)
-        return [
-            (i, text)
+        accepted = {
+            i: text
             for i, (text, confidence) in zip(indices, readings)
-            if confidence >= 0.3 and looks_like(text, source) and not (source == "ja" and self._ocr.is_latin(crops[i]))
-        ]
+            if confidence >= 0.3
+            and looks_like(text, source)
+            and not (screen and source == "ja" and self._ocr.is_latin(crops[i]))
+        }
+        if not screen and source != "ja" and scores is not None:
+            # Edições traduzidas costumam deixar em japonês placas, bilhetes e textos do cenário. O leitor do
+            # idioma da obra não lê nada ali; o leitor de mangá japonês tenta, mas só em caixas que o detector
+            # marcou com confiança (ele "inventa" japonês a partir de desenhos) e só se sair escrita japonesa.
+            retry = [i for i in indices if i not in accepted and scores[i] >= _SECOND_LANGUAGE_MIN_SCORE]
+            for i, (text, _confidence) in zip(retry, self._ocr.read([crops[i] for i in retry], "ja")):
+                if len(text) >= 2 and looks_like(text, "ja"):
+                    accepted[i] = text
+        return [(i, accepted[i]) for i in indices if i in accepted]
 
     def read_page(self, image: Image.Image, config: Config) -> list[tuple[Box, str]]:
         """Detecção + OCR de uma página importada: (caixa do texto, texto lido) na ordem de leitura.
@@ -307,9 +346,11 @@ class Pipeline:
         """
         with self._background():
             self._prepare(config, lambda _msg: None)
-            regions = self._detector.detect(image, config.include_free_text).regions
+            regions = self._detector.detect(image, profile="file").regions
             crops = [image.crop(r.text_box) for r in regions]
-            readable = self._read(crops, list(range(len(regions))), config.source_lang)
+            readable = self._read(
+                crops, list(range(len(regions))), config.source_lang, screen=False, scores=[r.score for r in regions]
+            )
         boxes = [(regions[i].text_box, text) for i, text in readable]
         return sorted(boxes, key=lambda item: _reading_order(item[0], image.height, config.source_lang))
 
