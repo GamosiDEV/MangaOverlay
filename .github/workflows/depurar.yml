@@ -34,7 +34,7 @@ jobs:
               & "$prefix\.venv\Scripts\python.exe" "$prefix\main.py" --translate
               Start-Sleep -Seconds 30
             }
-            Write-Host "=== rodada $round: saiu=$($app.HasExited) código=$(if ($app.HasExited) { '{0:X}' -f $app.ExitCode }) ==="
+            Write-Host "=== rodada ${round} - saiu=$($app.HasExited) codigo=$(if ($app.HasExited) { '{0:X}' -f $app.ExitCode }) ==="
             if ($app.HasExited) { $crashes++ } else { Stop-Process -Id $app.Id -Force }
             if (Test-Path $log) { Get-Content $log -Encoding UTF8 }
           }
