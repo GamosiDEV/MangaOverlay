@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 from dataclasses import replace
+from datetime import datetime
 
 from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
@@ -36,6 +37,11 @@ from .ui.works import NewWorkDialog, WorksDialog
 from .ui.importwindow import ImportWindow
 from .ui.overlay import OverlayWindow
 from .ui.settings import SettingsDialog
+
+
+def _log(message: str) -> None:
+    """Uma linha no stderr (no Windows, sem console, vai para o arquivo de log do app)."""
+    print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}", file=sys.stderr, flush=True)
 
 
 class _JobSignals(QObject):
@@ -644,6 +650,7 @@ class MangaOverlayApp(QObject):
                 overlay.show_result(result, size, font)
                 texts += len(result.items)
                 pages += result.color_image is not None
+        _log(f"Tela processada: {texts} texto(s), {pages} página(s) colorida(s)")
         if translate and self.config.saved_only:
             found = sum(1 for _r, (result, _s) in results.items() for i in result.items if not i.missing)
             lacking = sum(1 for _r, (result, _s) in results.items() for i in result.items if i.missing)
@@ -659,6 +666,7 @@ class MangaOverlayApp(QObject):
     def _on_failed(self, exc: Exception) -> None:
         self._busy = False
         self.hide_translation()
+        _log(f"Falha ao processar a tela: {exc.__class__.__name__}: {exc}")
         if isinstance(exc, screenshot.CaptureCancelled):
             return
         self._notify(str(exc) or exc.__class__.__name__, 12000, warning=True)

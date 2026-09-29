@@ -198,6 +198,7 @@ Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continu
 - Falas repetidas (はい, え?!…) vão uma vez só, e falas já traduzidas nunca são enviadas de novo.
 - Erros temporários (limite de requisições, servidor, rede) são tentados de novo sozinhos; se persistirem, o lote pausa em vez de desperdiçar pedidos. Erros definitivos (chave inválida, sem crédito) pausam com a mensagem. Falas que o modelo esquecer de devolver são pedidas de novo, só elas.
 - Fechar o app no meio não perde nada: o lote continua sozinho ao abrir de novo. "Pausar" deixa o lote parado até "Retomar tradução em lote" no menu (que também tenta de novo os blocos que falharam).
+- **Acompanhar o que está acontecendo:** a janela do lote mostra o bloco atual, o custo até agora, o tempo decorrido e quanto falta. **Mostrar detalhes** expande o passo a passo: cada bloco enviado (capítulo e páginas), quantas falas voltaram, em quanto tempo, tokens e custo, novas tentativas depois de erros temporários, falas que o modelo pulou, termos anotados no glossário, atualizações da memória, andamento da Batch API e o motivo de qualquer pausa. Se o lote pausar por erro, os detalhes abrem sozinhos. A janela pode ser fechada e reaberta a qualquer momento por "Andamento da tradução em lote…" no menu, e o mesmo registro fica no arquivo `traducao-em-lote.log` (veja [Onde ficam os arquivos](#onde-ficam-os-arquivos)).
 
 **Batch API da OpenAI:** com os motores da OpenAI, a tela oferece "Batch API" como modo de envio, com **50% de desconto**. O app envia todos os pedidos de uma vez e a OpenAI processa em segundo plano (em geral em minutos, com garantia de até 24 horas). Pode fechar o app ou desligar o computador: o id do lote fica no banco e o app confere o andamento a cada minuto quando está aberto. Quando termina, as traduções são gravadas e, se o modelo tiver pulado alguma fala, um novo envio leva só as que faltaram (até 2 vezes). "Pausar" cancela o lote na OpenAI guardando o que já tinha voltado; "Retomar" envia só o resto.
 
@@ -284,7 +285,8 @@ Com o app aberto, `--translate`, `--colorize` e `--hide` só avisam a instância
 | Configurações | `~/.config/MangaOverlay/config.json` | `%LOCALAPPDATA%\MangaOverlay\config.json` |
 | Obras e traduções (SQLite) | `~/.local/share/MangaOverlay/mangaoverlay.db` | `%LOCALAPPDATA%\MangaOverlay\mangaoverlay.db` |
 | Modelos | `~/.cache/huggingface` e `~/.cache/MangaOverlay/easyocr` | `%USERPROFILE%\.cache\huggingface` e `%LOCALAPPDATA%\MangaOverlay\Cache\easyocr` |
-| Log (sem console) | — | `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log` |
+| Log do app (sem console) | — | `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log` |
+| Log da tradução em lote | `~/.local/state/MangaOverlay/log/traducao-em-lote.log` | `%LOCALAPPDATA%\MangaOverlay\Logs\traducao-em-lote.log` |
 
 ## Como funciona
 
