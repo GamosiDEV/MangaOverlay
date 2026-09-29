@@ -69,6 +69,10 @@ class MangaOverlayApp(QObject):
         # Uma tarefa por vez: os modelos na GPU não são usados em paralelo
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
+        # A thread nunca expira: por padrão o Qt encerra a thread ociosa depois de 30 s e cria outra na tarefa seguinte.
+        # O PyTorch guarda estado por thread (OpenMP, caches da CPU), e no Windows usar os modelos numa thread nova depois
+        # que a anterior terminou corrompia o heap (crash 0xC0000374). Assim, os modelos vivem sempre na mesma thread.
+        self._pool.setExpiryTimeout(-1)
         self._running_jobs: set[_JobSignals] = set()
         self._overlays: dict[str, OverlayWindow] = {}
         self._busy = False

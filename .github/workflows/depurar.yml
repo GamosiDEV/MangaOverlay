@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variante: [sem-sobreposicao, captura-falsa, sem-pipeline]
+        variante: [sem-expirar-a, sem-expirar-b]
     steps:
       - uses: actions/checkout@v4
 
