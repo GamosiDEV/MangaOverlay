@@ -69,10 +69,6 @@ class MangaOverlayApp(QObject):
         # Uma tarefa por vez: os modelos na GPU não são usados em paralelo
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
-        # A thread nunca expira: por padrão o Qt encerra a thread ociosa depois de 30 s e cria outra na tarefa seguinte.
-        # O PyTorch guarda estado por thread (OpenMP, caches da CPU), e no Windows usar os modelos numa thread nova depois
-        # que a anterior terminou corrompia o heap (crash 0xC0000374). Assim, os modelos vivem sempre na mesma thread.
-        self._pool.setExpiryTimeout(-1)
         self._running_jobs: set[_JobSignals] = set()
         self._overlays: dict[str, OverlayWindow] = {}
         self._busy = False
@@ -622,11 +618,7 @@ class MangaOverlayApp(QObject):
             )
             return
         try:
-            if os.environ.get("MO_DBG") == "captura-falsa":  # DEPURAÇÃO (temporário)
-                from PIL import Image
-                shots = {QGuiApplication.primaryScreen().name(): Image.open(os.environ["MO_DBG_IMG"]).convert("RGB")}
-            else:
-                shots = screenshot.grab_qt_screens()
+            shots = screenshot.grab_qt_screens()
         except Exception as exc:
             self._on_failed(exc)
             return
@@ -636,15 +628,12 @@ class MangaOverlayApp(QObject):
         cursor_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         busy = self._overlay(cursor_screen.name())
         if busy is not None:
-            if os.environ.get("MO_DBG") != "sem-sobreposicao":  # DEPURAÇÃO (temporário)
-                busy.show_busy()
+            busy.show_busy()
         config = replace(self.config)
 
         def work():
             return {
-                name: ((self.pipeline.process(image, config, self.status.emit, translate, colorize)
-                        if os.environ.get("MO_DBG") != "sem-pipeline" else __import__("mangaoverlay.pipeline").pipeline.ScreenResult([], None, None)),
-                       image.size)
+                name: (self.pipeline.process(image, config, self.status.emit, translate, colorize), image.size)
                 for name, image in shots.items()
             }
 
@@ -658,8 +647,7 @@ class MangaOverlayApp(QObject):
         for name, (result, size) in results.items():
             overlay = self._overlay(name)
             if overlay is not None and (result.items or result.color_image is not None):
-                if os.environ.get("MO_DBG") != "sem-sobreposicao":  # DEPURAÇÃO (temporário)
-                    overlay.show_result(result, size, font)
+                overlay.show_result(result, size, font)
                 texts += len(result.items)
                 pages += result.color_image is not None
         _log(f"Tela processada: {texts} texto(s), {pages} página(s) colorida(s)")

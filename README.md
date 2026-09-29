@@ -307,6 +307,7 @@ Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s numa RTX 5050
 - Modo atual: **sob demanda** (aperte o atalho a cada página). Se a página rolar, a tradução e a cor ficam no lugar antigo até o próximo atalho.
 - Com OCR local, o idioma de origem precisa estar certo no menu da bandeja. "Detectar" só funciona nos motores em que o LLM lê a imagem.
 - Textos fora dos balões vêm desligados por padrão, porque o detector os confunde com textos de sites e menus.
+- **Windows:** o app pode fechar sozinho ao traduzir a tela (crash `0xC0000374`, visto nas máquinas de teste sem GPU; ainda em investigação, veja [docs/WINDOWS-CRASH.md](docs/WINDOWS-CRASH.md)). O `--image` não é afetado.
 - Não há versão para macOS.
 
 ## Próximos passos
