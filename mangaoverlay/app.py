@@ -618,7 +618,11 @@ class MangaOverlayApp(QObject):
             )
             return
         try:
-            shots = screenshot.grab_qt_screens()
+            if os.environ.get("MO_DBG") == "captura-falsa":  # DEPURAÇÃO (temporário)
+                from PIL import Image
+                shots = {QGuiApplication.primaryScreen().name(): Image.open(os.environ["MO_DBG_IMG"]).convert("RGB")}
+            else:
+                shots = screenshot.grab_qt_screens()
         except Exception as exc:
             self._on_failed(exc)
             return
@@ -628,12 +632,15 @@ class MangaOverlayApp(QObject):
         cursor_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         busy = self._overlay(cursor_screen.name())
         if busy is not None:
-            busy.show_busy()
+            if os.environ.get("MO_DBG") != "sem-sobreposicao":  # DEPURAÇÃO (temporário)
+                busy.show_busy()
         config = replace(self.config)
 
         def work():
             return {
-                name: (self.pipeline.process(image, config, self.status.emit, translate, colorize), image.size)
+                name: ((self.pipeline.process(image, config, self.status.emit, translate, colorize)
+                        if os.environ.get("MO_DBG") != "sem-pipeline" else __import__("mangaoverlay.pipeline").pipeline.ScreenResult([], None, None)),
+                       image.size)
                 for name, image in shots.items()
             }
 
@@ -647,7 +654,8 @@ class MangaOverlayApp(QObject):
         for name, (result, size) in results.items():
             overlay = self._overlay(name)
             if overlay is not None and (result.items or result.color_image is not None):
-                overlay.show_result(result, size, font)
+                if os.environ.get("MO_DBG") != "sem-sobreposicao":  # DEPURAÇÃO (temporário)
+                    overlay.show_result(result, size, font)
                 texts += len(result.items)
                 pages += result.color_image is not None
         _log(f"Tela processada: {texts} texto(s), {pages} página(s) colorida(s)")
