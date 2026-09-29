@@ -8,6 +8,10 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variante: [controle, sem-atalhos, sem-traduzir]
     steps:
       - uses: actions/checkout@v4
 
@@ -15,9 +19,24 @@ jobs:
         shell: cmd
         env:
           MANGAOVERLAY_NO_PAUSE: "1"
-        run: instalar-windows.cmd -Cpu -NoStart
+        run: instalar-windows.cmd -Cpu -NoStart -NoModels
 
-      - name: Abrir o app e traduzir a tela várias vezes
+      - name: Baixar os modelos usados
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $prefix = Join-Path $env:LOCALAPPDATA 'Programs\MangaOverlay'
+          & "$prefix\.venv\Scripts\python.exe" "$prefix\main.py" --image tests\fixtures\pagina-sintetica.png --engine local --source ja --out x.png
+
+      - name: Configurar a variante
+        if: matrix.variante == 'sem-atalhos'
+        shell: powershell
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'MangaOverlay'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          '{"hotkey_translate": "", "hotkey_colorize": "", "hotkey_hide": ""}' | Set-Content (Join-Path $dir 'config.json') -Encoding ASCII
+
+      - name: Abrir o app várias vezes
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -31,11 +50,13 @@ jobs:
             Start-Sleep -Seconds 40
             foreach ($shot in 1..3) {
               if ($app.HasExited) { break }
-              & "$prefix\.venv\Scripts\python.exe" "$prefix\main.py" --translate
+              if ('${{ matrix.variante }}' -ne 'sem-traduzir') {
+                & "$prefix\.venv\Scripts\python.exe" "$prefix\main.py" --translate
+              }
               Start-Sleep -Seconds 30
             }
             Write-Host "=== rodada ${round} - saiu=$($app.HasExited) codigo=$(if ($app.HasExited) { '{0:X}' -f $app.ExitCode }) ==="
             if ($app.HasExited) { $crashes++ } else { Stop-Process -Id $app.Id -Force }
-            if (Test-Path $log) { Get-Content $log -Encoding UTF8 }
+            if (Test-Path $log) { Get-Content $log -Encoding UTF8 | Select-String -NotMatch 'HF_TOKEN|pin_memory|super\(\).__init__|max_new_tokens' }
           }
           if ($crashes) { throw "$crashes rodada(s) com crash" }
