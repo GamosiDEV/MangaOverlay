@@ -289,6 +289,23 @@ FUZZY_MIN_LENGTH = 4
 FUZZY_MIN_RATIO = 0.8
 
 
+def match_key(text: str) -> str:
+    """Só as letras e números do texto, em minúsculas: base da busca tolerante (o OCR varia na pontuação)."""
+    return "".join(ch for ch in unicodedata.normalize("NFKC", text).casefold() if unicodedata.category(ch)[0] in "LN")
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Iguais a menos de uma letra trocada, sobrando ou faltando."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    shorter, longer = (a, b) if len(a) < len(b) else (b, a)
+    return any(longer[:i] + longer[i + 1 :] == shorter for i in range(len(longer)))
+
+
 def normalize(text: str) -> str:
     """Forma canônica do texto lido pelo OCR: NFKC (largura dos caracteres) e sem espaços."""
     return "".join(unicodedata.normalize("NFKC", text).split())
@@ -385,8 +402,8 @@ class Database:
         """
         found = self._find_exact(key, texts)
         missing = {normalize(t) for t in texts if t.strip()} - found.keys()
-        if fuzzy and {t for t in missing if len(t) >= FUZZY_MIN_LENGTH}:
-            found.update(self._find_similar(key, {t for t in missing if len(t) >= FUZZY_MIN_LENGTH}))
+        if fuzzy and missing:
+            found.update(self._find_similar(key, missing))
         for engine in also_engines:
             missing = {normalize(t) for t in texts if t.strip()} - found.keys()
             if not missing:
@@ -406,20 +423,38 @@ class Database:
         return [row[0] for row in rows]
 
     def _find_similar(self, key: TranslationKey, texts: set[str]) -> dict[str, str]:
+        """Busca tolerante a diferenças de leitura do OCR entre o arquivo importado e a tela.
+
+        Compara só letras e números (sem pontuação, apóstrofos, espaços e maiúsculas: "WE'RE" = "WERE"), aceita
+        80% de semelhança e, a partir de 4 caracteres, também uma única letra diferente. Medido num volume real:
+        as falas que a tela não reconhecia tinham 71–75% de semelhança no texto bruto e 86–100% só nas letras.
+        """
         with self._lock:
             candidates = self._conn.execute(
                 """SELECT texto_original, traducao FROM traducoes
-                   WHERE IFNULL(obra_id, 0) = ? AND idioma_origem = ? AND idioma_destino = ? AND motor = ? AND modelo = ?
-                     AND length(texto_original) >= ?""",
-                (key.work_id or 0, key.source, key.target, key.engine, key.model, FUZZY_MIN_LENGTH),
+                   WHERE IFNULL(obra_id, 0) = ? AND idioma_origem = ? AND idioma_destino = ? AND motor = ? AND modelo = ?""",
+                (key.work_id or 0, key.source, key.target, key.engine, key.model),
             ).fetchall()
+        prepared = [(match_key(original), translation) for original, translation in candidates]
+        by_key = {k: translation for k, translation in prepared if k}
         found = {}
         for text in texts:
+            wanted = match_key(text)
+            if not wanted:
+                continue
+            if wanted in by_key:
+                found[text] = by_key[wanted]
+                continue
+            if len(wanted) < FUZZY_MIN_LENGTH:
+                continue  # falas curtas: uma letra muda o sentido (はい x はあ); só a igualdade das letras vale
             best, best_ratio = None, FUZZY_MIN_RATIO
-            for original, translation in candidates:
-                if abs(len(original) - len(text)) > max(2, len(text) // 3):
+            for other, translation in prepared:
+                if abs(len(other) - len(wanted)) > max(2, len(wanted) // 3):
                     continue
-                matcher = SequenceMatcher(None, text, original, autojunk=False)
+                if _one_edit_apart(wanted, other):
+                    best, best_ratio = translation, 1.0
+                    break
+                matcher = SequenceMatcher(None, wanted, other, autojunk=False)
                 if matcher.quick_ratio() < best_ratio:
                     continue
                 ratio = matcher.ratio()
