@@ -33,6 +33,13 @@ def _prepare_streams() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")
+    # Num crash nativo (Qt, PyTorch…), grava a pilha de todas as threads no stderr/log
+    import faulthandler
+
+    try:
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+    except (AttributeError, OSError, ValueError):  # stderr sem descritor de arquivo
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
