@@ -1,0 +1,28 @@
+# Versões testadas, usadas pelo instalador (pip install -r requirements.txt -c constraints.txt).
+# O PyTorch fica de fora: o instalador escolhe a variante (CUDA ou CPU) conforme a placa de vídeo.
+PySide6==6.11.2
+PySide6_Addons==6.11.2
+PySide6_Essentials==6.11.2
+shiboken6==6.11.2
+pillow==12.1.1
+numpy==2.3.5
+transformers==5.17.0
+tokenizers==0.23.2
+huggingface_hub==1.33.0
+safetensors==0.8.0
+sentencepiece==0.2.2
+easyocr==1.7.2
+opencv-python-headless==5.0.0.93
+scikit-image==0.26.0
+scipy==1.18.1
+onnx==1.23.0
+onnx2torch==1.5.15
+protobuf==7.36.2
+pypdfium2==5.13.0
+deep-translator==1.11.4
+openai==3.19.2
+anthropic==1.8.0
+keyring==25.7.0
+platformdirs==4.9.4
+pynput==1.8.2
+jeepney==0.9.0
