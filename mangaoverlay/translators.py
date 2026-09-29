@@ -177,7 +177,9 @@ def llm_instructions(
         "turn sound effects into equivalent onomatopoeia. Keep each translation short, because it has to fit in "
         "the original speech bubble. The texts are in reading order and belong to the same scene; "
         "the optional context holds the lines of the previous pages. "
-        "Return one item per number, with an empty translation if a box has no readable text." + _NEW_TERMS
+        "Return one item per number. Every readable text needs a translation, including sound effects, laughs, "
+        "interjections and short captions (give the natural Brazilian Portuguese equivalent, e.g. 'HUH HUH' → 'Hã hã', "
+        "'THANK YOU' → 'Obrigado'); leave the translation empty only if the box has no readable text at all." + _NEW_TERMS
     ) + characters_block(characters or []) + memory_block(memory)
 
 

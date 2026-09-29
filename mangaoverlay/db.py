@@ -287,6 +287,8 @@ class TranslationKey:
 # (「一宿題…」 x 「・宿題…」). Falas curtas ficam de fora: nelas uma letra muda o sentido (はい x はあ).
 FUZZY_MIN_LENGTH = 4
 FUZZY_MIN_RATIO = 0.8
+# Abaixo disto (em letras), só vale igualdade ou uma letra diferente; a semelhança percentual só nas falas longas
+FUZZY_RATIO_MIN_LENGTH = 12
 
 
 def match_key(text: str) -> str:
@@ -454,6 +456,9 @@ class Database:
                 if _one_edit_apart(wanted, other):
                     best, best_ratio = translation, 1.0
                     break
+                if len(wanted) < FUZZY_RATIO_MIN_LENGTH:
+                    # Falas curtas: semelhança percentual engana ("FATHER, EH" tem 86% de "FATHER" e é outra fala)
+                    continue
                 matcher = SequenceMatcher(None, wanted, other, autojunk=False)
                 if matcher.quick_ratio() < best_ratio:
                     continue
@@ -944,3 +949,15 @@ class Database:
             self._conn.execute("BEGIN")
             self._conn.executemany("UPDATE traducoes SET traducao = ? WHERE id = ?", [(text, i) for i, text in changes])
             self._conn.execute("COMMIT")
+
+    # --- âncora da página na tela ------------------------------------------------------
+
+    def work_regions(self, work_id: int) -> list[tuple[int, tuple[int, int, int, int], str]]:
+        """(página, caixa no arquivo, texto lido) de todas as falas importadas da obra."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT p.id, r.x0, r.y0, r.x1, r.y1, r.texto_original FROM regioes r JOIN paginas p ON p.id = r.pagina_id
+                   JOIN capitulos c ON c.id = p.capitulo_id WHERE c.obra_id = ?""",
+                (work_id,),
+            ).fetchall()
+        return [(page, (x0, y0, x1, y1), text) for page, x0, y0, x1, y1, text in rows]

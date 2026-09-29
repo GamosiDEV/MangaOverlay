@@ -82,6 +82,15 @@ class OcrEngine:
             self._easyocr[source] = reader
         return reader
 
+    def find_text_blocks(self, image: Image.Image, source: str) -> list[tuple[int, int, int, int]]:
+        """Blocos de texto horizontal na página inteira (detector de texto do EasyOCR), com as linhas próximas de
+        uma mesma legenda juntadas num bloco só. Usado na importação para pegar o que o detector de balões perdeu:
+        legendas sobre o desenho, placas, onomatopeias em letras."""
+        reader = self.load(source if source in _EASYOCR_LANGS else "en")
+        horizontal, _free = reader.detect(np.asarray(image.convert("RGB")), min_size=12, text_threshold=0.6, low_text=0.35)
+        lines = [(int(x0), int(y0), int(x1), int(y1)) for x0, x1, y0, y1 in (horizontal[0] if horizontal else [])]
+        return _merge_lines(lines)
+
     def is_latin(self, crop: Image.Image) -> bool:
         """O recorte tem texto latino legível? O manga-ocr "inventa" japonês a partir de qualquer texto,
         então botões e legendas em português virariam falas; o EasyOCR em inglês desmascara esses casos."""
@@ -110,3 +119,25 @@ class OcrEngine:
         separator = "" if source.startswith("zh") else " "
         confidence = sum(conf for _box, _text, conf in lines) / len(lines)
         return separator.join(text.strip() for _box, text, _conf in lines), float(confidence)
+
+
+def _merge_lines(lines: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+    """Junta linhas que se sobrepõem na horizontal e estão a menos de ~0,8 altura de linha uma da outra."""
+    blocks = [list(line) for line in lines]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(blocks)):
+            for j in range(i + 1, len(blocks)):
+                a, b = blocks[i], blocks[j]
+                gap = 0.8 * min(a[3] - a[1], b[3] - b[1])
+                horizontal = min(a[2], b[2]) - max(a[0], b[0]) > -gap
+                vertical = min(a[3], b[3]) - max(a[1], b[1]) > -gap
+                if horizontal and vertical:
+                    blocks[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    del blocks[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return [tuple(b) for b in blocks]

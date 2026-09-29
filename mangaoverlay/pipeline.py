@@ -2,7 +2,8 @@
 
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
+from difflib import SequenceMatcher
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from PIL import Image
 from . import credentials, llm_anthropic, llm_openai, translators
 from .colorize import Colorizer, find_page
 from .config import ENGINES, VISION_ENGINES, Config
-from .db import Database, TranslationKey, normalize
+from .db import FUZZY_MIN_RATIO, FUZZY_RATIO_MIN_LENGTH, Database, TranslationKey, _one_edit_apart, match_key, normalize
 from .memory import GLOSSARY_LIMIT, SCREEN_CONSOLIDATE_EVERY
 from .detector import Box, Detector, Region
 from .languages import AUTO, looks_like
@@ -68,6 +69,49 @@ class ScreenResult:
     items: list[OverlayItem]  # traduções
     color_box: Box | None  # onde está a página na tela (quando colorida)
     color_image: Image.Image | None  # a página colorida, do tamanho de color_box
+
+
+def _same_line(a: str, b: str) -> bool:
+    """Mesma fala lida de forma um pouco diferente (mesmas regras da busca tolerante do banco)."""
+    if _one_edit_apart(a, b):
+        return True
+    return len(a) >= FUZZY_RATIO_MIN_LENGTH and SequenceMatcher(None, a, b, autojunk=False).ratio() >= FUZZY_MIN_RATIO
+
+
+def _fit_transform(pairs: list[tuple[tuple[float, float], Box]], size: tuple[int, int]) -> tuple[float, float, float] | None:
+    """Escala e deslocamento que levam as caixas do arquivo às posições na tela. None se as falas não concordarem."""
+    if len(pairs) < 2:
+        return None
+    files = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for _c, b in pairs]
+    screens = [c for c, _b in pairs]
+    ratios = []
+    for i in range(len(pairs)):
+        for j in range(i + 1, len(pairs)):
+            file_dist = ((files[i][0] - files[j][0]) ** 2 + (files[i][1] - files[j][1]) ** 2) ** 0.5
+            screen_dist = ((screens[i][0] - screens[j][0]) ** 2 + (screens[i][1] - screens[j][1]) ** 2) ** 0.5
+            if file_dist > 40:
+                ratios.append(screen_dist / file_dist)
+    if not ratios:
+        return None
+    scale = float(np.median(ratios))
+    dx = float(np.median([s[0] - f[0] * scale for s, f in zip(screens, files)]))
+    dy = float(np.median([s[1] - f[1] * scale for s, f in zip(screens, files)]))
+    # Conferência: as falas reconhecidas têm de cair perto de onde a projeção diz
+    tolerance = 0.03 * max(size)
+    agree = sum(1 for s, f in zip(screens, files) if abs(f[0] * scale + dx - s[0]) < tolerance and abs(f[1] * scale + dy - s[1]) < tolerance)
+    if scale <= 0.05 or agree < 2 or agree < 0.6 * len(pairs):
+        return None
+    return scale, dx, dy
+
+
+def _center_inside(box: Box, area: Box) -> bool:
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    return area[0] <= cx <= area[2] and area[1] <= cy <= area[3]
+
+
+def _overlaps(a: Box, b: Box) -> bool:
+    """A mesma caixa vista pelos dois perfis: o centro de uma cai dentro da outra."""
+    return _center_inside(a, b) or _center_inside(b, a)
 
 
 def _reading_order(box: Box, page_height: int, source: str) -> tuple:
@@ -194,14 +238,118 @@ class Pipeline:
                     self._colorizer = Colorizer(self._device)
                 result.color_image = self._colorizer.colorize(image.crop(result.color_box))
 
-        if translate and detection.regions:
+        regions, verify_only = detection.regions, frozenset()
+        if translate and self._db is not None and config.current_work is not None and config.source_lang != AUTO:
+            regions, verify_only = self._with_saved_extras(image, detection, config)
+        if translate and regions:
             # Com a página colorida, o fundo que cobre o texto original acompanha a cor nova do balão
             base = image
             if result.color_image is not None:
                 base = image.copy()
                 base.paste(result.color_image, result.color_box[:2])
-            result.items = self._translate_regions(image, np.asarray(base.convert("RGB")), detection.regions, config, status)
+            frame = np.asarray(base.convert("RGB"))
+            result.items = self._translate_regions(image, frame, regions, config, status, verify_only)
+            if self._db is not None and config.current_work is not None and config.source_lang != AUTO:
+                extra = self._anchor_page(image, frame, result.items, config, status)
+                # A âncora sabe a tradução de caixas que a tela detectou mas leu errado: substitui a marcação de falta
+                kept = [i for i in result.items if not (i.missing and any(_overlaps(i.fill, e.fill) for e in extra))]
+                result.items = kept + extra
         return result
+
+    def _anchor_page(
+        self, image: Image.Image, frame: np.ndarray, items: list[OverlayItem], config: Config, status: Callable[[str], None]
+    ) -> list[OverlayItem]:
+        """Se a tela mostra uma página importada, desenha TODAS as falas dela a partir do banco, inclusive as que a
+        captura da tela não detectou ou não leu (legendas sobre o desenho, textos pequenos).
+
+        As falas reconhecidas votam na página; com 2 ou mais concordando, calcula a escala e a posição da página na
+        tela e projeta as outras falas. Sem concordância, não faz nada (nunca desenha no lugar errado)."""
+        regions = self._db.work_regions(config.current_work)
+        if not regions or not items:
+            return []
+        by_key: dict[str, list[tuple[int, Box]]] = defaultdict(list)
+        for page, box, text in regions:
+            by_key[match_key(text)].append((page, box))
+        votes: dict[int, list[tuple[tuple[float, float], Box]]] = defaultdict(list)
+        for item in items:
+            if item.missing:
+                continue
+            wanted = match_key(item.original)
+            if len(wanted) < 4:
+                continue
+            matches = by_key.get(wanted) or [
+                entry
+                for key, entries in by_key.items()
+                if abs(len(key) - len(wanted)) <= max(2, len(wanted) // 3) and _same_line(wanted, key)
+                for entry in entries
+            ]
+            if not matches or len({page for page, _b in matches}) > 3:
+                continue  # fala comum demais (aparece em várias páginas): não identifica a página
+            center = ((item.fill[0] + item.fill[2]) / 2, (item.fill[1] + item.fill[3]) / 2)
+            for page, box in matches:
+                votes[page].append((center, box))
+        if not votes:
+            return []
+        page, pairs = max(votes.items(), key=lambda kv: len(kv[1]))
+        transform = _fit_transform(pairs, image.size)
+        if transform is None:
+            return []
+        scale, dx, dy = transform
+
+        shown = [item.fill for item in items if not item.missing]
+        projected = []
+        for region_page, box, text in regions:
+            if region_page != page:
+                continue
+            screen_box = (
+                round(box[0] * scale + dx), round(box[1] * scale + dy), round(box[2] * scale + dx), round(box[3] * scale + dy)
+            )
+            if screen_box[2] <= 0 or screen_box[3] <= 0 or screen_box[0] >= image.width or screen_box[1] >= image.height:
+                continue  # parte da página fora da tela
+            if any(_overlaps(screen_box, s) for s in shown):
+                continue  # já está na tela
+            projected.append((screen_box, text))
+        if not projected:
+            return []
+
+        key = self._db_key(config)
+        saved = self._db.find_translations(key, [t for _b, t in projected], also_engines=ALL_ENGINES)
+        results = {i: saved.get(normalize(t)) for i, (_b, t) in enumerate(projected)}
+        pending = [(i, t) for i, (_b, t) in enumerate(projected) if results[i] is None]
+        if pending and not config.saved_only:
+            # Texto da página importada (não de menus): pode ir ao tradutor
+            fake = [Region(text_box=b, area=b, bubble=None) for b, _t in projected]
+            new = self._call_translator(image, fake, pending, config, status)
+            self._db.save_translations(key, [(dict(pending)[i], r.translation or dict(pending)[i]) for i, r in new.items()])
+            results.update({i: r.translation for i, r in new.items()})
+
+        extra = []
+        for i, (box, text) in enumerate(projected):
+            translation = results.get(i)
+            fill = _expand(box, image.size)
+            if not translation:
+                if config.saved_only:
+                    extra.append(OverlayItem(fill, box, "", text, (255, 255, 255), None, missing=True))
+                continue
+            if translation.casefold() == text.casefold():
+                continue  # "não precisa traduzir" (reticências, onomatopeias)
+            extra.append(OverlayItem(fill, _expand(box, image.size), translation, text, _background(frame, fill), None))
+        return extra
+
+    def _with_saved_extras(self, image: Image.Image, detection, config: Config) -> tuple[list[Region], frozenset[int]]:
+        """Na tela, os filtros de segurança deixam de fora legendas, narração e textos soltos. Dentro da área da página,
+        esses textos também são procurados, mas só aparecem se já tiverem tradução salva (vinda de um capítulo
+        importado): nunca são enviados ao tradutor, então textos de menus e sites continuam protegidos."""
+        page = find_page(image, detection.bubbles)
+        if page is None:
+            return detection.regions, frozenset()
+        known = detection.regions
+        extras = [
+            r
+            for r in self._detector.detect(image, profile="file").regions
+            if _center_inside(r.text_box, page) and not any(_overlaps(r.text_box, k.text_box) for k in known)
+        ]
+        return known + extras, frozenset(range(len(known), len(known) + len(extras)))
 
     def _translate_regions(
         self,
@@ -210,6 +358,7 @@ class Pipeline:
         regions: list[Region],
         config: Config,
         status: Callable[[str], None],
+        verify_only: frozenset[int] = frozenset(),
     ) -> list[OverlayItem]:
         key = (config.current_work, config.engine, config.openai_model, config.claude_model, config.source_lang, config.target_lang)
         crops = [image.crop(r.text_box) for r in regions]
@@ -224,7 +373,7 @@ class Pipeline:
                 missing.append(index)
 
         if missing:
-            new = self._translate(image, regions, crops, missing, config, status)
+            new = self._translate(image, regions, crops, missing, config, status, verify_only)
             for index in missing:
                 if index in new:
                     results[index] = new[index]
@@ -263,8 +412,10 @@ class Pipeline:
         indices: list[int],
         config: Config,
         status: Callable[[str], None],
+        verify_only: frozenset[int] = frozenset(),
     ) -> dict[int, Result]:
-        """Tradução das regiões `indices`: banco primeiro (pelo texto lido), tradutor só para o que falta."""
+        """Tradução das regiões `indices`: banco primeiro (pelo texto lido), tradutor só para o que falta.
+        Regiões em `verify_only` só aparecem se estiverem no banco (nunca vão ao tradutor)."""
         source = config.source_lang
         if source == AUTO:
             if config.saved_only:
@@ -297,6 +448,7 @@ class Pipeline:
                 else:
                     pending.append((index, text))
 
+        pending = [(index, text) for index, text in pending if index not in verify_only]
         if pending and config.saved_only:
             # Nunca traduz: o que não está no banco volta sem tradução (e é marcado na tela)
             results.update({index: Result(0, text, "") for index, text in pending})
@@ -351,6 +503,19 @@ class Pipeline:
             readable = self._read(
                 crops, list(range(len(regions))), config.source_lang, screen=False, scores=[r.score for r in regions]
             )
+            # Varredura da página inteira: linhas de texto que o detector de balões não pegou (legendas sobre o
+            # desenho, placas, onomatopeias em letras). Japonês vertical fica com o detector de mangá, que é melhor.
+            if config.source_lang != "ja":
+                found = [regions[i].text_box for i, _t in readable]
+                sweep = [
+                    b
+                    for b in self._ocr.find_text_blocks(image, config.source_lang)
+                    if not any(_overlaps(b, f) for f in found) and (b[2] - b[0]) * (b[3] - b[1]) >= 150
+                ]
+                for box, (text, confidence) in zip(sweep, self._ocr.read([image.crop(b) for b in sweep], config.source_lang)):
+                    if confidence >= 0.4 and looks_like(text, config.source_lang) and sum(ch.isalpha() for ch in text) >= 2:
+                        regions.append(Region(text_box=box, area=box, bubble=None, score=0.5))
+                        readable.append((len(regions) - 1, text))
         boxes = [(regions[i].text_box, text) for i, text in readable]
         return sorted(boxes, key=lambda item: _reading_order(item[0], image.height, config.source_lang))
 

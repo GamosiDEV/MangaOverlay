@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot
 from .config import ENGINES, Config
@@ -346,17 +346,31 @@ class MangaOverlayApp(QObject):
         self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
 
     def _resumable_batches(self):
-        """Lotes pausados e lotes concluídos com blocos que falharam."""
-        paused = self.db.batches(("pausado",))
-        with_failures = [b for b in self.db.batches(("concluido",)) if self.db.batch_summary(b.id).failed]
-        return paused + with_failures
+        """Só lotes pausados, do mais recente para o mais antigo. Lotes concluídos nunca são reenviados: blocos que
+        "falharam" são falas que o modelo não traduz (reticências, onomatopeias), e reenviá-los só gastava."""
+        return list(reversed(self.db.batches(("pausado",))))
 
     def _resume_batches(self, silent: bool) -> None:
-        """Ao abrir o app (silent): continua os lotes que estavam ativos. Pelo menu: também os pausados e as falhas."""
+        """Ao abrir o app (silent): continua o que estava ativo quando o app fechou. Pelo menu: o lote pausado que o
+        usuário escolher (o mais recente já vem selecionado; os outros continuam pausados)."""
         if not silent:
-            for batch in self._resumable_batches():
-                self.db.retry_failed_requests(batch.id)
-                self.db.set_batch_state(batch.id, "ativo")
+            paused = self._resumable_batches()
+            if not paused:
+                return
+            chosen = paused[0]
+            if len(paused) > 1:
+                labels = []
+                for batch in paused:
+                    work = self.db.work(batch.work_id)
+                    pending = len(self.db.batch_requests(batch.id))
+                    labels.append(f"{work.name if work else '?'} — lote {batch.id} — {pending} bloco(s) pendente(s)")
+                label, ok = QInputDialog.getItem(
+                    None, APP_DISPLAY_NAME, "Qual tradução em lote retomar? (as outras continuam pausadas)", labels, 0, False
+                )
+                if not ok:
+                    return
+                chosen = paused[labels.index(label)]
+            self.db.set_batch_state(chosen.id, "ativo")
         active = self.db.batches(("ativo",))
         if not active:
             return

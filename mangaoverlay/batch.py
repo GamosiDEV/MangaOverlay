@@ -259,7 +259,9 @@ class BatchRunner(QObject):
                 raise _Pause(str(exc)) from exc
             usage = usage + call_usage
             cost += pricing.cost(key.model, call_usage.input_tokens, call_usage.output_tokens, call_usage.cached_tokens) or 0.0
-            self._db.save_translations(key, [(lines[r.id - 1].text, r.translation) for r in results if r.translation])
+            # Fala devolvida sem tradução (reticências, onomatopeias): grava o próprio original como "não precisa
+            # traduzir". Sem isso ela era reenviada em toda rodada e em todo "Retomar", sempre paga e sempre vazia.
+            self._db.save_translations(key, [(lines[r.id - 1].text, r.translation or lines[r.id - 1].text) for r in results])
             self._db.add_terms(batch.work_id, terms)
 
         context.extend(line.text for line in source_lines)
@@ -410,7 +412,7 @@ class BatchRunner(QObject):
                 results = parse_response(text, [Line(n, t) for n, t in enumerate(sent, start=1)])
             except MalformedResponse:
                 results = []  # as falas continuam faltando e vão no próximo envio
-            self._db.save_translations(key, [(sent[r.id - 1], r.translation) for r in results if r.translation])
+            self._db.save_translations(key, [(sent[r.id - 1], r.translation or sent[r.id - 1]) for r in results])
             self._db.add_terms(batch.work_id, parse_terms(text))
             cost = pricing.cost(key.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, openai_batch.DISCOUNT) or 0.0
             self._db.record_request(request_id, "pendente", _usage_tuple(usage), cost)
