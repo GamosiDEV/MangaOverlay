@@ -10,7 +10,7 @@ import signal
 import sys
 from dataclasses import replace
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
 from pathlib import Path
 
@@ -41,22 +41,6 @@ from .ui.settings import SettingsDialog
 class _JobSignals(QObject):
     done = Signal(object)
     failed = Signal(object)
-
-
-class _Job(QRunnable):
-    def __init__(self, fn, *args):
-        super().__init__()
-        self._fn = fn
-        self._args = args
-        self.signals = _JobSignals()
-
-    def run(self) -> None:
-        try:
-            result = self._fn(*self._args)
-        except Exception as exc:
-            self.signals.failed.emit(exc)
-        else:
-            self.signals.done.emit(result)
 
 
 class MangaOverlayApp(QObject):
@@ -101,6 +85,7 @@ class MangaOverlayApp(QObject):
         self._batch_poll.timeout.connect(self._poll_remote_batches)
         self._batch_poll.start()
         self.batch_runner.progress.connect(self._batch_window.update_progress)
+        self.batch_runner.log.connect(self._batch_window.add_log)
         self.batch_runner.finished.connect(self._on_batch_finished)
 
         self._build_tray()
@@ -158,7 +143,7 @@ class MangaOverlayApp(QObject):
         menu.addAction("Importar capítulos…", self._import_chapters)
         self._batch_action = menu.addAction("Traduzir capítulos…", self._translate_chapters)
         self._batch_resume_action = menu.addAction("", lambda: self._resume_batches(silent=False))
-        self._batch_progress_action = menu.addAction("Ver progresso da tradução em lote", self._batch_window.show)
+        self._batch_progress_action = menu.addAction("Andamento da tradução em lote…", self._show_batch_window)
         self._resume_action = menu.addAction("", lambda: self._resume_import(silent=False))
         self._import_progress_action = menu.addAction("Ver progresso da importação", self._import_window.show)
         menu.aboutToShow.connect(self._refresh_import_actions)
@@ -219,7 +204,8 @@ class MangaOverlayApp(QObject):
         resumable = 0 if batch_running else len(self._resumable_batches())
         self._batch_resume_action.setText(f"Retomar tradução em lote ({resumable} lote(s))")
         self._batch_resume_action.setVisible(resumable > 0)
-        self._batch_progress_action.setVisible(batch_running)
+        # Também depois de pausar ou terminar (para ver o log) e com lote esperando a OpenAI
+        self._batch_progress_action.setVisible(batch_running or self._batch_window.has_log or bool(self.db.batches(("ativo",))))
         self._batch_action.setEnabled(self.config.current_work is not None)
 
     def _open_characters(self) -> None:
@@ -240,7 +226,7 @@ class MangaOverlayApp(QObject):
         dialog.setWindowIcon(app_icon())
         if dialog.exec() == NameReviewDialog.DialogCode.Accepted and dialog.applied:
             # A leitura guarda traduções na memória da sessão: esvazia para mostrar as corrigidas
-            self._pool.start(_Job(self.pipeline.clear_cache))
+            self._pool.start(lambda: self.pipeline.clear_cache())
             self._notify(f"{dialog.applied} tradução(ões) corrigida(s).", 5000)
 
     def _open_memory(self) -> None:
@@ -401,6 +387,11 @@ class MangaOverlayApp(QObject):
         if self.batch_runner.start(self.config):
             self._batch_window.start(title)
 
+    def _show_batch_window(self) -> None:
+        self._batch_window.show()
+        self._batch_window.raise_()
+        self._batch_window.activateWindow()
+
     def _on_batch_finished(self, outcome) -> None:
         self._batch_window.show_outcome(outcome)
         if not self._batch_window.isVisible():
@@ -486,7 +477,8 @@ class MangaOverlayApp(QObject):
         if answer != QMessageBox.StandardButton.Yes:
             return
         # Na fila de trabalho, para não apagar no meio de uma tradução
-        self._pool.start(_Job(self.pipeline.clear_cache, self.config.current_work, True))
+        work_id = self.config.current_work
+        self._pool.start(lambda: self.pipeline.clear_cache(work_id, True))
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -548,17 +540,27 @@ class MangaOverlayApp(QObject):
     # --- captura e tradução ---------------------------------------------------
 
     def _run(self, fn, *args, on_done, on_failed) -> None:
-        job = _Job(fn, *args)
-        signals = job.signals
+        # O pool recebe uma função comum, não uma subclasse de QRunnable: com autoDelete, o Qt apagava o
+        # QRunnable na thread de trabalho enquanto o Python ainda tinha o objeto, e o Windows abortava o
+        # processo por corrupção de heap (0xC0000374). Os sinais ficam só do lado do Python, na thread principal.
+        signals = _JobSignals()
         self._running_jobs.add(signals)
 
         def finish(handler, value):
             self._running_jobs.discard(signals)
             handler(value)
 
+        def work() -> None:
+            try:
+                result = fn(*args)
+            except Exception as exc:
+                signals.failed.emit(exc)
+            else:
+                signals.done.emit(result)
+
         signals.done.connect(lambda value: finish(on_done, value))
         signals.failed.connect(lambda exc: finish(on_failed, exc))
-        self._pool.start(job)
+        self._pool.start(work)
 
     def _on_hotkey(self, action: str) -> None:
         if action == "hide":

@@ -1,6 +1,10 @@
 """Tradução em lote: escolha dos capítulos (com custo estimado ao vivo) e janela de progresso."""
 
-from PySide6.QtCore import Qt, Signal
+import html
+import time
+
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -9,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -18,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_DISPLAY_NAME, pricing
-from ..batch import LLM_ENGINES, TEXT_ENGINE, BatchOutcome, BatchProgress, batch_key, estimate
+from ..batch import LLM_ENGINES, LOG_FILE, TEXT_ENGINE, BatchLogEntry, BatchOutcome, BatchProgress, batch_key, estimate
 from ..config import ENGINES, Config
 from ..db import Database, Work, normalize
 
@@ -181,30 +186,95 @@ class BatchDialog(QDialog):
 
 
 class BatchWindow(QWidget):
-    """Progresso da tradução em lote (não bloqueia o resto do app)."""
+    """Progresso da tradução em lote (não bloqueia o resto do app).
+
+    "Mostrar detalhes" expande um log com o passo a passo: cada bloco enviado, quanto voltou, tempo, tokens e
+    custo, novas tentativas, falas que o modelo pulou, memória da obra e erros. O mesmo log vai para um arquivo.
+    """
 
     pause_requested = Signal()
+
+    _MAX_ENTRIES = 3000
+    _LEVELS = {  # nível -> (símbolo, cor)
+        "info": ("•", ""),
+        "ok": ("✓", "#2e8b57"),
+        "aviso": ("⚠", "#d35400"),
+        "erro": ("✖", "#c0392b"),
+    }
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle(f"Tradução em lote — {APP_DISPLAY_NAME}")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(560)
         self._title = QLabel("Preparando…")
         self._title.setWordWrap(True)
         self._bar = QProgressBar()
         self._details = QLabel("")
         self._details.setWordWrap(True)
+        self._timing = QLabel("")
+        self._timing.setStyleSheet("color: palette(placeholder-text);")
         self._button = QPushButton("Pausar")
         self._button.clicked.connect(self._on_button)
+        self._toggle = QPushButton()
+        self._toggle.setCheckable(True)
+        self._toggle.toggled.connect(self._set_expanded)
         self._finished = False
+        self._started_at: float | None = None
+        self._first_done: int | None = None  # blocos já prontos quando esta execução começou (retomada)
+        self._entries: list[BatchLogEntry] = []
+        self._warnings = 0
+        self._errors = 0
+        self._last_done = 0
+        self._last_total = 0
+
+        # Painel de detalhes
+        self._counters = QLabel("")
+        self._log_view = QPlainTextEdit()
+        self._log_view.setReadOnly(True)
+        self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._log_view.setMaximumBlockCount(self._MAX_ENTRIES)
+        self._log_view.setPlaceholderText("Nada registrado ainda.")
+        self._only_problems = QCheckBox("Só avisos e erros")
+        self._only_problems.toggled.connect(self._render_log)
+        copy = QPushButton("Copiar log")
+        copy.clicked.connect(self._copy_log)
+        open_file = QPushButton("Abrir arquivo de log")
+        open_file.setToolTip(str(LOG_FILE))
+        open_file.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_FILE))))
+        log_buttons = QHBoxLayout()
+        log_buttons.addWidget(self._only_problems)
+        log_buttons.addStretch(1)
+        log_buttons.addWidget(copy)
+        log_buttons.addWidget(open_file)
+        self._panel = QWidget()
+        panel = QVBoxLayout(self._panel)
+        panel.setContentsMargins(0, 0, 0, 0)
+        panel.addWidget(self._counters)
+        panel.addWidget(self._log_view, 1)
+        panel.addLayout(log_buttons)
+        self._panel.setVisible(False)
+
         buttons = QHBoxLayout()
+        buttons.addWidget(self._toggle)
         buttons.addStretch(1)
         buttons.addWidget(self._button)
         layout = QVBoxLayout(self)
         layout.addWidget(self._title)
         layout.addWidget(self._bar)
         layout.addWidget(self._details)
+        layout.addWidget(self._timing)
         layout.addLayout(buttons)
+        layout.addWidget(self._panel, 1)
+        self._update_toggle()
+
+        # Tempo decorrido e estimativa atualizados a cada segundo, mesmo sem novidades do lote
+        self._clock = QTimer(self)
+        self._clock.setInterval(1000)
+        self._clock.timeout.connect(self._update_timing)
+
+    @property
+    def has_log(self) -> bool:
+        return bool(self._entries)
 
     def start(self, title: str) -> None:
         self._finished = False
@@ -213,19 +283,43 @@ class BatchWindow(QWidget):
         self._details.setText("Pode fechar esta janela: a tradução continua em segundo plano.")
         self._button.setText("Pausar")
         self._button.setEnabled(True)
+        self._started_at = time.monotonic()
+        self._first_done = None
+        self._last_done = self._last_total = 0
+        self._clock.start()
+        self._update_timing()
         self.show()
         self.raise_()
 
     def update_progress(self, progress: BatchProgress) -> None:
+        if self._started_at is None:  # retomada automática ao abrir o app, sem start()
+            self._started_at = time.monotonic()
+            self._clock.start()
+        if self._first_done is None:
+            self._first_done = progress.done
+        self._last_done, self._last_total = progress.done, progress.total
         self._bar.setRange(0, max(1, progress.total))
         self._bar.setValue(progress.done)
         details = [progress.message, f"custo até agora: {pricing.format_cost(progress.cost) if progress.cost else 'US$ 0'}"]
         if progress.failed:
             details.append(f"{progress.failed} bloco(s) com falas sem tradução")
         self._details.setText(" · ".join(details))
+        self._update_timing()
+
+    def add_log(self, entry: BatchLogEntry) -> None:
+        self._entries.append(entry)
+        if len(self._entries) > self._MAX_ENTRIES:
+            del self._entries[: len(self._entries) - self._MAX_ENTRIES]
+        self._warnings += entry.level == "aviso"
+        self._errors += entry.level == "erro"
+        if not self._only_problems.isChecked() or entry.level in ("aviso", "erro"):
+            self._append(entry)
+        self._update_toggle()
 
     def show_outcome(self, outcome: BatchOutcome) -> None:
         self._finished = True
+        self._clock.stop()
+        self._update_timing()
         s = outcome.summary
         cost = pricing.format_cost(s.cost) if s.cost else "US$ 0"
         if outcome.state == "concluido":
@@ -243,10 +337,77 @@ class BatchWindow(QWidget):
                 (f"Motivo: {outcome.error}\n" if outcome.error else "")
                 + "Continue por “Retomar tradução em lote” no menu da bandeja."
             )
+            if outcome.error:
+                self._toggle.setChecked(True)  # pausou por erro: mostra o que aconteceu antes
         else:
             self._title.setText("Tradução interrompida; continua quando o app abrir de novo.")
         self._button.setText("Fechar")
         self._button.setEnabled(True)
+
+    # --- detalhes ---------------------------------------------------------------------
+
+    def _set_expanded(self, expanded: bool) -> None:
+        self._panel.setVisible(expanded)
+        self._update_toggle()
+        if expanded:
+            self.resize(max(self.width(), 760), max(self.height(), 560))
+            self._log_view.verticalScrollBar().setValue(self._log_view.verticalScrollBar().maximum())
+        else:
+            self.adjustSize()
+
+    def _update_toggle(self) -> None:
+        problems = []
+        if self._errors:
+            problems.append(f"{self._errors} erro(s)")
+        if self._warnings:
+            problems.append(f"{self._warnings} aviso(s)")
+        extra = f" ({', '.join(problems)})" if problems else ""
+        arrow = "▴" if self._toggle.isChecked() else "▾"
+        self._toggle.setText(f"{'Esconder' if self._toggle.isChecked() else 'Mostrar'} detalhes{extra} {arrow}")
+        self._counters.setText(
+            f"{len(self._entries)} registro(s) · {self._warnings} aviso(s) · {self._errors} erro(s)"
+            + (f" · blocos: {self._last_done} de {self._last_total}" if self._last_total else "")
+        )
+
+    def _format(self, entry: BatchLogEntry) -> str:
+        symbol, color = self._LEVELS.get(entry.level, ("•", ""))
+        text = html.escape(entry.message)
+        if color:
+            text = f"<span style='color:{color}'>{symbol} {text}</span>"
+        else:
+            text = f"{symbol} {text}"
+        return f"<span style='color:gray'>{entry.time:%H:%M:%S}</span> {text}"
+
+    def _append(self, entry: BatchLogEntry) -> None:
+        bar = self._log_view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        self._log_view.appendHtml(self._format(entry))
+        if at_bottom:  # não arrasta a rolagem de quem está lendo algo mais acima
+            bar.setValue(bar.maximum())
+
+    def _render_log(self) -> None:
+        self._log_view.clear()
+        only = self._only_problems.isChecked()
+        for entry in self._entries:
+            if not only or entry.level in ("aviso", "erro"):
+                self._append(entry)
+
+    def _copy_log(self) -> None:
+        QGuiApplication.clipboard().setText(
+            "\n".join(f"{e.time:%Y-%m-%d %H:%M:%S} [{e.level}] {e.message}" for e in self._entries)
+        )
+
+    def _update_timing(self) -> None:
+        if self._started_at is None:
+            self._timing.setText("")
+            return
+        elapsed = time.monotonic() - self._started_at
+        text = f"Tempo decorrido: {_duration(elapsed)}"
+        done_now = self._last_done - (self._first_done or 0)
+        remaining = self._last_total - self._last_done
+        if not self._finished and done_now > 0 and remaining > 0:
+            text += f" · faltam cerca de {_duration(elapsed / done_now * remaining)}"
+        self._timing.setText(text)
 
     def _on_button(self) -> None:
         if self._finished:
@@ -259,3 +420,14 @@ class BatchWindow(QWidget):
     def closeEvent(self, event) -> None:
         event.ignore()
         self.hide()
+
+
+def _duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} min {seconds:02d} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min"

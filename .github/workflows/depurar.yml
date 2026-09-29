@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variante: [controle, sem-atalhos, sem-traduzir]
+        variante: [correcao-a, correcao-b]
     steps:
       - uses: actions/checkout@v4
 
