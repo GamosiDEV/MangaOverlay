@@ -1,0 +1,10 @@
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf
+*.png binary
+*.ico binary
+.github/ export-ignore
+tests/ export-ignore
+docs/ export-ignore
+.gitattributes export-ignore
+.gitignore export-ignore

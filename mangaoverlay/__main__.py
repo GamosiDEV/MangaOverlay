@@ -5,11 +5,42 @@ um comando pela IPC e saem, sem importar o Qt nem os modelos (os atalhos do GNOM
 """
 
 import argparse
+import os
+import sys
 
-from . import APP_ID, ipc
+from . import APP_ID, APP_NAME, ipc
+
+_LOG_LIMIT = 5 * 1024 * 1024
+
+
+def _prepare_streams() -> None:
+    """Aberto pelo atalho do Windows (pythonw.exe), o app não tem console: stdout e stderr são None, e qualquer
+    print ou barra de progresso de download derrubaria o processo. Nesse caso a saída vai para um arquivo de log."""
+    if sys.stdout is None or sys.stderr is None:
+        from pathlib import Path
+
+        from platformdirs import user_log_dir
+
+        log_dir = Path(user_log_dir(APP_NAME, appauthor=False))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{APP_ID}.log"
+        mode = "w" if log_file.exists() and log_file.stat().st_size > _LOG_LIMIT else "a"
+        log = open(log_file, mode, encoding="utf-8", buffering=1)  # noqa: SIM115 (fica aberto até o fim)
+        sys.stdout = sys.stdout or log
+        sys.stderr = sys.stderr or log
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    # Console ou pipe do Windows em cp1252: texto japonês não pode derrubar um print
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
 
 
 def main(argv: list[str] | None = None) -> int:
+    _prepare_streams()
+    if sys.platform == "win32":
+        # Sem o modo de desenvolvedor, o Windows não cria symlinks: o cache do Hugging Face copia os arquivos e avisa
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
     parser = argparse.ArgumentParser(prog=APP_ID, description="Traduz os balões de mangá visíveis na tela.")
     parser.add_argument("--translate", action="store_true", help="traduz a tela agora (na instância em execução, ou abre o app e traduz)")
     parser.add_argument("--colorize", action="store_true", help="mostra a página na tela colorida (na instância em execução, ou abre o app)")
@@ -20,7 +51,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", help="com --image: idioma de origem (ja, ko, zh-CN, zh-TW, en, auto)")
     parser.add_argument("--color", action="store_true", help="com --image: colore a página também")
     parser.add_argument("--no-translate", action="store_true", help="com --image: não traduz (use com --color)")
+    parser.add_argument("--download-models", action="store_true", help="baixa todos os modelos locais agora (o instalador usa)")
     args = parser.parse_args(argv)
+
+    if args.download_models:
+        from .models import download_all
+
+        return download_all()
 
     if args.image:
         from .imagefile import translate_file
