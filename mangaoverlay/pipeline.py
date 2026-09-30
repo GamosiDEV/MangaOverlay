@@ -108,6 +108,25 @@ def _fit_transform(pairs: list[tuple[tuple[float, float], Box]], size: tuple[int
     return scale, dx, dy
 
 
+def _single_transform(fill: Box, file_box: Box, length: int) -> tuple[float, float, float] | None:
+    """Escala e deslocamento a partir de uma fala só: a caixa dela na tela (com a folga de _expand) contra a caixa no
+    arquivo. Só para falas longas (identificam bem a página) e se a escala na horizontal e na vertical concordarem."""
+    if length < 8:
+        return None
+    fw, fh = fill[2] - fill[0], fill[3] - fill[1]
+    pad = max(3, round(min(fw, fh) * 0.06 / 1.12))  # desfaz a folga de _expand (6% do menor lado, de cada lado)
+    width, height = file_box[2] - file_box[0], file_box[3] - file_box[1]
+    if width <= 0 or height <= 0:
+        return None
+    sx, sy = (fw - 2 * pad) / width, (fh - 2 * pad) / height
+    if sx <= 0.05 or abs(sx - sy) > 0.15 * max(sx, sy):
+        return None
+    scale = (sx + sy) / 2
+    dx = (fill[0] + fill[2]) / 2 - (file_box[0] + file_box[2]) / 2 * scale
+    dy = (fill[1] + fill[3]) / 2 - (file_box[1] + file_box[3]) / 2 * scale
+    return scale, dx, dy
+
+
 def _center_inside(box: Box, area: Box) -> bool:
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     return area[0] <= cx <= area[2] and area[1] <= cy <= area[3]
@@ -291,6 +310,8 @@ class Pipeline:
         for page, box, text in regions:
             by_key[match_key(text)].append((page, box))
         votes: dict[int, list[tuple[tuple[float, float], Box]]] = defaultdict(list)
+        # Para o caso de uma fala só: (caixa na tela, caixa no arquivo, tamanho da fala) das que identificam uma página
+        single: dict[int, tuple[Box, Box, int]] = {}
         for item in items:
             if item.missing:
                 continue
@@ -308,10 +329,15 @@ class Pipeline:
             center = ((item.fill[0] + item.fill[2]) / 2, (item.fill[1] + item.fill[3]) / 2)
             for page, box in matches:
                 votes[page].append((center, box))
+            if len(matches) == 1:
+                single[matches[0][0]] = (item.fill, matches[0][1], len(wanted))
         if not votes:
             return []
         page, pairs = max(votes.items(), key=lambda kv: len(kv[1]))
         transform = _fit_transform(pairs, image.size)
+        if transform is None and len(pairs) == 1 and page in single:
+            # Só uma fala reconhecida (ex.: HQ com duas falas, uma em fonte que o OCR lê diferente a cada vez)
+            transform = _single_transform(*single[page])
         if transform is None:
             return []
         scale, dx, dy = transform
@@ -361,9 +387,9 @@ class Pipeline:
         """Na tela, os filtros de segurança deixam de fora legendas, narração e textos soltos. Dentro da área da página,
         esses textos também são procurados, mas só aparecem se já tiverem tradução salva (vinda de um capítulo
         importado): nunca são enviados ao tradutor, então textos de menus e sites continuam protegidos."""
-        page = find_page(image, detection.bubbles)
-        if page is None:
-            return detection.regions, frozenset()
+        # Sem balões para achar a página (HQ com o texto sobre o desenho), procura na tela inteira: continua seguro,
+        # porque esses textos só aparecem se já estiverem traduzidos no banco da obra, e menus e sites nunca estão
+        page = find_page(image, detection.bubbles) or (0, 0, image.width, image.height)
         known = detection.regions
         extras = [
             r
@@ -505,6 +531,13 @@ class Pipeline:
             and looks_like(text, source)
             and not (screen and source == "ja" and self._ocr.is_latin(crops[i]))
         }
+        if source.startswith("zh"):
+            # Chinês em fonte estilizada (colorida, com contorno) que o EasyOCR não lê: o leitor de mangá, treinado em
+            # japonês, lê bem os caracteres chineses, que são quase os mesmos
+            retry = [i for i in indices if i not in accepted]
+            for i, (text, confidence) in zip(retry, self._ocr.read([crops[i] for i in retry], "ja")):
+                if confidence >= 0.3 and len(text) >= 2 and looks_like(text, source):
+                    accepted[i] = text
         if not screen and source != "ja" and scores is not None:
             # Edições traduzidas costumam deixar em japonês placas, bilhetes e textos do cenário. O leitor do
             # idioma da obra não lê nada ali; o leitor de mangá japonês tenta, mas só em caixas que o detector

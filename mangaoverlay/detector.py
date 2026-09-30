@@ -157,17 +157,23 @@ class Detector:
             Region(text_box=text, area=_union(_inset(bubbles[i], _BUBBLE_INSET), text), bubble=bubbles[i])
             for i, text in grouped.items()
         ]
-        if include_free_text and bubbles:
-            # O detector também marca textos de menus e sites como "texto livre". Só vale o que estiver
-            # na faixa da página onde há balões (leitores de mangá centralizam a página).
-            left = min(b[0] for b in bubbles)
-            right = max(b[2] for b in bubbles)
-            margin = (right - left) * 0.25
-            regions += [
-                Region(text_box=t, area=t, bubble=None)
-                for t in free
-                if left - margin <= (t[0] + t[2]) / 2 <= right + margin and not any(_contains_center(b, t) for b in bubbles)
-            ]
+        if include_free_text:
+            # Texto solto (narração, onomatopeias, HQs sem balões) e texto "de balão" sem balão em volta. O mesmo
+            # texto costuma vir marcado das duas formas: fica uma vez só.
+            loose: list[Box] = []
+            for t in free + [t for t in texts if not any(_contains_center(b, t) for b in bubbles)]:
+                if not any(_contains_center(b, t) for b in bubbles) and not any(_contains_center(k, t) for k in loose):
+                    loose.append(t)
+            if bubbles:
+                # O detector também marca textos de menus e sites como "texto livre". Com balões na tela, só vale o
+                # que estiver na faixa da página onde eles estão (leitores de mangá centralizam a página).
+                left = min(b[0] for b in bubbles)
+                right = max(b[2] for b in bubbles)
+                margin = (right - left) * 0.25
+                loose = [t for t in loose if left - margin <= (t[0] + t[2]) / 2 <= right + margin]
+            # Sem balões (HQ com o texto sobre o desenho), vale tudo: o OCR descarta o que não estiver na escrita do
+            # idioma de origem, como menus em português ou inglês
+            regions += [Region(text_box=t, area=t, bubble=None) for t in loose]
 
         return Detection(self._clip(regions, image.size), bubbles)
 
