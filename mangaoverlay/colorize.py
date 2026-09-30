@@ -59,18 +59,37 @@ class Colorizer:
         return Image.merge("YCbCr", (gray, cb, cr)).convert("RGB")
 
 
-def _boundary(line: np.ndarray, saturation: np.ndarray) -> tuple[bool, bool]:
-    """(tem cor de interface, é uma faixa uniforme e não branca) para uma linha/coluna da imagem."""
+# Diferença de tom (0-255) a partir da qual uma faixa uniforme já não é o papel da página
+_PAPER_TOLERANCE = 3
+
+
+def _boundary(line: np.ndarray, saturation: np.ndarray, paper: float) -> tuple[bool, bool]:
+    """(tem cor de interface, é uma faixa uniforme que não é o papel) para uma linha/coluna da imagem.
+
+    O papel é a cor do fundo dos balões. Uma faixa uniforme de outro tom é o fundo em volta da página: escuro no
+    leitor, cinza claro no Paint e em visualizadores, branco num site com um scan amarelado. As calhas entre os
+    quadros têm a cor do papel e não interrompem.
+    """
     colored = float((saturation > 40).mean()) > 0.02
-    uniform = float(line.std()) < 5 and float(line.mean()) < 180
+    mean = float(line.mean())
+    uniform = float(line.std()) < 5 and (mean < 180 or abs(mean - paper) > _PAPER_TOLERANCE)
     return colored, uniform
+
+
+def _paper(gray: np.ndarray, bubbles: list[Box], scale: int) -> float:
+    """Tom do papel: a mediana dos pixels claros dentro dos balões (o texto e o contorno são escuros)."""
+    inside = [gray[b[1] // scale : b[3] // scale, b[0] // scale : b[2] // scale].ravel() for b in bubbles]
+    pixels = np.concatenate(inside) if inside else np.empty(0)
+    light = pixels[pixels > 180]
+    return float(np.median(light)) if light.size else 255.0
 
 
 def find_page(image: Image.Image, bubbles: list[Box]) -> Box | None:
     """Retângulo da página de mangá na tela, expandido a partir dos balões até a borda da página.
 
-    Para numa faixa uniforme escura/cinza (fundo do leitor) de 12 px ou mais, ou em pixels coloridos
-    (interface do navegador, outras janelas). Os vãos brancos entre quadros não interrompem.
+    Para numa faixa uniforme de 12 px ou mais que não tenha o tom do papel (fundo do leitor, do visualizador ou do
+    site), ou em pixels coloridos (interface do navegador, outras janelas). Os vãos brancos entre quadros não
+    interrompem.
     """
     if not bubbles:
         return None
@@ -84,6 +103,7 @@ def find_page(image: Image.Image, bubbles: list[Box]) -> Box | None:
     x1 = min(w, max(b[2] for b in bubbles) // scale)
     y1 = min(h, max(b[3] for b in bubbles) // scale)
     run = 12 // scale
+    paper = _paper(gray, bubbles, scale)
 
     def advance(side: str) -> bool:
         """Tenta avançar um lado; retorna False se chegou na borda da página."""
@@ -113,10 +133,10 @@ def find_page(image: Image.Image, bubbles: list[Box]) -> Box | None:
                 probe.append((gray[y, x0:x1], saturation[y, x0:x1]))
         if not probe:
             return False
-        colored, uniform = _boundary(*probe[0])
+        colored, uniform = _boundary(*probe[0], paper)
         if colored:
             return False
-        if uniform and len(probe) == run and all(_boundary(*p)[1] for p in probe):
+        if uniform and len(probe) == run and all(_boundary(*p, paper)[1] for p in probe):
             return False
         if side == "left":
             x0 -= 1
