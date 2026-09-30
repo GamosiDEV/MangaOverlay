@@ -36,6 +36,7 @@ class SummaryResult:
     chapters: list[str]
     usage: Usage
     cost: float
+    error: str | None = None  # o resumo falhou (tenta de novo quando o próximo capítulo terminar)
 
 
 def summary_model(config: Config, engine: str) -> str | None:
@@ -69,7 +70,7 @@ def summarize_chapters(db: Database, config: Config, key: TranslationKey) -> Sum
     """Para cada capítulo que acabou de ficar completo (em ordem): resume, se o resumo estiver ligado, e no fim
     atualiza a foto do glossário. Se nenhum capítulo terminou, não muda nada: a memória fica congelada durante o
     capítulo, e o começo dos pedidos continua idêntico (cache de prompt)."""
-    usage, cost, done = Usage(), 0.0, []
+    usage, cost, done, error = Usage(), 0.0, [], None
     work_id = key.work_id
     model = summary_model(config, key.engine) if config.memory_summary else None
     for chapter_id, name, translations in db.chapters_to_summarize(work_id, key):
@@ -87,7 +88,8 @@ def summarize_chapters(db: Database, config: Config, key: TranslationKey) -> Sum
                         [{"type": "text", "text": text}], _SUMMARY_SCHEMA,
                     )
                 summary = str(json.loads(raw).get("summary", "")).strip()
-            except (TranslationError, ValueError):
+            except (TranslationError, ValueError) as exc:
+                error = f"{name}: {exc}"
                 break  # o resumo é um extra: se falhar, tenta de novo quando o próximo capítulo terminar
             if summary:
                 db.set_summary(work_id, summary)
@@ -97,4 +99,4 @@ def summarize_chapters(db: Database, config: Config, key: TranslationKey) -> Sum
         done.append(name)
     if done:
         db.consolidate_terms(work_id, GLOSSARY_LIMIT)
-    return SummaryResult(done, usage, cost)
+    return SummaryResult(done, usage, cost, error)
