@@ -42,10 +42,15 @@ class FakePipeline:
         self.db = db
         self.translated: list[str] = []
         self.layouts = 0  # páginas em que o detector teria rodado
+        self.erased: list = []  # caixas de texto mandadas para a reconstrução do desenho
 
     def page_layout(self, image, boxes, config):
         self.layouts += 1
         return [Region(b, b, (b[0] - 30, b[1] - 30, b[2] + 30, b[3] + 30)) for b in boxes]
+
+    def erase_text(self, image, boxes, config):
+        self.erased += list(boxes)
+        return image
 
     def translate_stored(self, image, regions, pending, config, status=None):
         self.translated += [t for _i, t in pending]
@@ -180,3 +185,29 @@ def test_balao_guardado_na_importacao_dispensa_o_detector(setup):
     assert db.stored_pages(chapter)[0].layouts == [((40, 40, 160, 160), (30, 30, 170, 170))]
     result, pipeline = _generate(setup)
     assert result.drawn == 1 and pipeline.layouts == 0
+
+
+def test_reconstruir_so_texto_fora_de_balao(setup):
+    db, work, chapter, out = setup
+    first, second = db.stored_pages(chapter)
+    # Página 1: fala sobre o desenho (hachura em volta do texto); página 2: fala sem tradução
+    source = out.parent / "cap1" / "01.png"
+    page = Image.open(source)
+    draw = ImageDraw.Draw(page)
+    for x in range(40, 170, 3):  # hachura cinza em volta e por baixo do texto
+        draw.line((x, 40, x, 160), fill=(120, 120, 120))
+    for y in range(70, 130, 12):
+        draw.line((70, y, 130, y), fill=(10, 10, 10), width=3)  # linhas de texto
+    page.save(source)
+    pipeline = FakePipeline(db)
+    result = generate_chapter(db, pipeline, work_config(CONFIG, work), chapter, out, "cbz", False, threading.Event(), inpaint=True)
+    assert pipeline.erased == [TEXT] and result.drawn == 1
+    # Sem a opção, nada vai para a reconstrução; e texto em papel liso nunca vai
+    pipeline = FakePipeline(db)
+    shutil.copy(out.parent / "cap1" / "02.png", source)
+    db.save_translations(TranslationKey(work.id, "ja", "pt", "local", "x"), [("ここはどこ", "Onde?")])
+    generate_chapter(db, pipeline, work_config(CONFIG, work), chapter, out, "cbz", False, threading.Event(), inpaint=True)
+    assert pipeline.erased == []
+    pipeline = FakePipeline(db)
+    generate_chapter(db, pipeline, work_config(CONFIG, work), chapter, out, "cbz", False, threading.Event())
+    assert pipeline.erased == []

@@ -237,6 +237,7 @@ O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: O
 - **Formato:** **CBZ**, um arquivo por capítulo (recomendado; leva um `ComicInfo.xml` com obra e capítulo), ou **pasta de imagens**, uma pasta por capítulo. O app lembra o último formato e a última pasta.
 - **Sem custo:** usa as traduções já salvas da obra, de qualquer motor, e nada é traduzido de novo. O desenho é o mesmo do overlay, na resolução original da página.
 - **Falas sem tradução:** a janela mostra quantas faltam e sempre oferece traduzi-las com o motor atual, com o custo estimado antes (motores pagos começam desmarcados). Sem a opção, essas falas ficam como no original.
+- **Reconstruir o desenho** (opcional): texto de narração ou placa sobre o desenho é apagado e o fundo é refeito por IA ([LaMa](https://github.com/advimman/lama), na sua máquina), em vez de coberto por um retângulo. Só o texto sobre o desenho passa por isso; balões com papel liso continuam só cobertos. Na primeira vez baixa ~200 MB; com placa NVIDIA custa ~0,3 s por texto (um volume de 248 páginas levou 42 s, contra 31 s sem).
 - **Páginas não lidas** (importação pendente ou com erro) entram como no original. Se o arquivo original do capítulo foi movido, o capítulo é pulado com um aviso.
 - Parar no meio não deixa arquivo pela metade: os capítulos prontos ficam e o que estava em andamento não é gravado. Gerar de novo na mesma pasta substitui a versão anterior (com confirmação).
 
@@ -244,7 +245,7 @@ Para o texto ficar com cara de quadrinho, use a fonte **Comic Neue** (incluída 
 
 Os arquivos originais nunca são alterados. As imagens geradas são para a sua leitura; compartilhá-las é responsabilidade de quem as gera.
 
-Pela linha de comando: `mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes]`.
+Pela linha de comando: `mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes] [--reconstruir]`.
 
 ### Exportar e importar dados
 
@@ -336,7 +337,7 @@ mangaoverlay --download-models  # baixa todos os modelos de uma vez
 mangaoverlay --export dados.zip [--obra NOME]... [--partes obras,paginas,traducoes]
                               # exporta obras, páginas e traduções (todas, sem --obra/--partes)
 mangaoverlay --import dados.zip # importa, sem substituir nada do que já existe
-mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes]
+mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes] [--reconstruir]
                               # grava os capítulos importados com as traduções desenhadas (CBZ ou pasta de imagens)
 mangaoverlay --image pagina.png [--out saida.png] [--engine local] [--source ja] [--color] [--no-translate]
                               # traduz e/ou colore um arquivo e grava o resultado (para testes)
@@ -383,4 +384,4 @@ Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s numa RTX 5050
 
 ## Licença
 
-[MIT](LICENSE). A fonte Comic Neue (`assets/fonts`) é distribuída sob a SIL Open Font License 1.1. Os modelos têm licenças próprias: o NLLB é CC-BY-NC 4.0 (uso não comercial) e o colorizador não declara licença no repositório original.
+[MIT](LICENSE). A fonte Comic Neue (`assets/fonts`) é distribuída sob a SIL Open Font License 1.1. O LaMa (reconstrução do desenho) é Apache-2.0. Os modelos têm licenças próprias: o NLLB é CC-BY-NC 4.0 (uso não comercial) e o colorizador não declara licença no repositório original.

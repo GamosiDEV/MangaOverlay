@@ -90,6 +90,13 @@ class GenerateDialog(QDialog):
         folder_row.addWidget(self.folder, 1)
         folder_row.addWidget(browse)
 
+        self.inpaint = QCheckBox("Reconstruir o desenho por baixo do texto fora dos balões (narração, placas)")
+        self.inpaint.setToolTip(
+            "Apaga o texto original e redesenha o fundo com IA (LaMa) na sua máquina, em vez de cobrir com um retângulo. "
+            "Mais lento (cerca de 0,3 s por texto com placa de vídeo, alguns segundos sem); na primeira vez baixa ~200 MB."
+        )
+        self.inpaint.setChecked(config.generate_inpaint)
+
         # Falas sem tradução: sempre oferece traduzir, com o custo antes. Motor pago começa desmarcado.
         self.translate = QCheckBox("")
         self.translate.setChecked(config.engine not in LLM_ENGINES)
@@ -120,6 +127,7 @@ class GenerateDialog(QDialog):
         layout.addWidget(self.cbz)
         layout.addWidget(self.folder_format)
         layout.addLayout(folder_row)
+        layout.addWidget(self.inpaint)
         layout.addWidget(QLabel("<b>Falas sem tradução salva</b>"))
         layout.addWidget(self.translate)
         layout.addWidget(self.missing_note)

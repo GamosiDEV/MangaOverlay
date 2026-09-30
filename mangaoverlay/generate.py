@@ -28,7 +28,18 @@ from . import pricing
 from .config import VISION_ENGINES, Config
 from .db import Database, StoredPage, TranslationKey, Work, normalize
 from .detector import Region
-from .pipeline import ALL_ENGINES, OverlayItem, Pipeline, PipelineError, _background, _expand, box_paper, bubble_shape
+from .pipeline import (
+    ALL_ENGINES,
+    OverlayItem,
+    Pipeline,
+    PipelineError,
+    _expand,
+    box_paper,
+    bubble_shape,
+    over_art,
+    same_place,
+    text_background,
+)
 from .sources import load_page
 from .translators import TranslationError, llm_instructions
 
@@ -114,9 +125,17 @@ def estimate_missing(
 
 
 def render_page(
-    image: Image.Image, regions: list[Region], texts: list[str], translations: dict[str, str], font, language: str = ""
+    image: Image.Image,
+    regions: list[Region],
+    texts: list[str],
+    translations: dict[str, str],
+    font,
+    language: str = "",
+    erased: frozenset[int] = frozenset(),
 ) -> tuple[Image.Image, int]:
-    """A página com as traduções desenhadas (mesmo desenho do overlay) e quantas falas foram desenhadas."""
+    """A página com as traduções desenhadas (mesmo desenho do overlay) e quantas falas foram desenhadas. `erased`:
+    falas cujo texto original já foi apagado (desenho reconstruído): a tradução vai no lugar dele, sem cobertura e com o
+    contorno de legibilidade dos textos soltos."""
     from PySide6.QtGui import QImage, QPainter
 
     from .render import paint_items
@@ -124,13 +143,21 @@ def render_page(
 
     frame = np.asarray(image.convert("RGB"))
     items = []
-    for region, text in zip(regions, texts):
+    placed: list = []
+    for index, (region, text) in enumerate(zip(regions, texts)):
         translation = translations.get(normalize(text))
         # Tradução igual ao original: "não precisa traduzir" (reticências, onomatopeias)
         if not translation or translation.casefold() == text.casefold():
             continue
+        # A mesma fala marcada duas vezes: uma tradução por cima da outra (sem cobertura, as duas apareceriam)
+        if any(same_place(region.text_box, other) for other in placed):
+            continue
+        placed.append(region.text_box)
         fill = _expand(region.text_box, image.size)
-        background = _background(frame, fill)
+        background = text_background(frame, region.text_box, fill)
+        if index in erased:
+            items.append(OverlayItem(fill, fill, translation, text, background, None, language=language, cover=False))
+            continue
         shape = bubble_shape(frame, region.bubble, background) if region.bubble else "ellipse"
         if shape == "rect":
             background = box_paper(frame, region.bubble)
@@ -235,8 +262,9 @@ def generate_chapter(
     stop: threading.Event,
     on_page: Callable[[str, int], None] = lambda _chapter, _page: None,
     status: Callable[[str], None] = lambda _msg: None,
+    inpaint: bool = False,
 ) -> ChapterResult:
-    """Gera um capítulo. `config` já aplicada à obra (ver work_config). Erros do tradutor sobem (TranslationError,
+    """Gera um capítulo. `inpaint`: reconstrói o desenho por baixo do texto fora dos balões (ver inpaint.py). `config` já aplicada à obra (ver work_config). Erros do tradutor sobem (TranslationError,
     PipelineError); o que já foi traduzido fica salvo no banco, e o arquivo do capítulo não é gravado."""
     work_id, chapter_name, order = db.chapter_info(chapter_id)
     work = db.work(work_id)
@@ -263,7 +291,7 @@ def generate_chapter(
                 result.problems.append(f"{chapter_name}, página {page.number}: {exc or exc.__class__.__name__}")
                 continue
             if page.regions:
-                image = _translated_page(db, pipeline, config, key, image, page, translate_missing, result, status)
+                image = _translated_page(db, pipeline, config, key, image, page, translate_missing, result, status, inpaint)
             output.add(f"{index:0{digits}d}.jpg", encode_page(image))
             result.pages += 1
         if not result.pages:  # nenhuma página abriu: um capítulo vazio não serve para nada
@@ -289,6 +317,7 @@ def _translated_page(
     translate_missing: bool,
     result: ChapterResult,
     status: Callable[[str], None],
+    inpaint: bool = False,
 ) -> Image.Image:
     boxes = [box for box, _t in page.regions]
     texts = [text for _b, text in page.regions]
@@ -306,7 +335,24 @@ def _translated_page(
         regions = [Region(box, area, bubble) for box, (area, bubble) in zip(boxes, page.layouts)]
     else:
         regions = pipeline.page_layout(image, boxes, config)
-    image, drawn = render_page(image, regions, texts, translations, font_of(config), config.target_lang)
+    erased: frozenset[int] = frozenset()
+    if inpaint:
+        # Só o texto sobre o desenho: no papel liso de um balão, cobrir já resolve. O critério é o que está em volta do
+        # texto, e não "ter balão": com o limiar baixo dos arquivos, o detector vê balões em volta de onomatopeias
+        frame = np.asarray(image.convert("RGB"))
+        drawable = {
+            i for i, (region, text) in enumerate(zip(regions, texts))
+            if (tr := translations.get(normalize(text))) and tr.casefold() != text.casefold()
+            and over_art(frame, region.text_box, _expand(region.text_box, image.size))
+        }
+        if drawable:
+            boxes_to_erase: list = []
+            for i in sorted(drawable):
+                if not any(same_place(regions[i].text_box, other) for other in boxes_to_erase):
+                    boxes_to_erase.append(regions[i].text_box)
+            image = pipeline.erase_text(image, boxes_to_erase, config)
+            erased = frozenset(drawable)
+    image, drawn = render_page(image, regions, texts, translations, font_of(config), config.target_lang, erased)
     result.drawn += drawn
     return image
 
@@ -363,11 +409,13 @@ class Generator(QObject):
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, config: Config, work: Work, chapter_ids: list[int], folder: Path, fmt: str, translate_missing: bool) -> bool:
+    def start(
+        self, config: Config, work: Work, chapter_ids: list[int], folder: Path, fmt: str, translate_missing: bool, inpaint: bool = False
+    ) -> bool:
         if self.running:
             return False
         self._stop.clear()
-        args = (work_config(config, work), work, chapter_ids, folder, fmt, translate_missing)
+        args = (work_config(config, work), work, chapter_ids, folder, fmt, translate_missing, inpaint)
         self._thread = threading.Thread(target=self._run, args=args, name="gerar-capitulos", daemon=True)
         self._thread.start()
         return True
@@ -380,7 +428,9 @@ class Generator(QObject):
         if self._thread is not None:
             self._thread.join(timeout)
 
-    def _run(self, config: Config, work: Work, chapter_ids: list[int], folder: Path, fmt: str, translate_missing: bool) -> None:
+    def _run(
+        self, config: Config, work: Work, chapter_ids: list[int], folder: Path, fmt: str, translate_missing: bool, inpaint: bool
+    ) -> None:
         pages = {c.id: c.pages for c in self._db.chapters(work.id)}
         total = sum(pages.get(c, 0) for c in chapter_ids)
         summary = GenerateSummary(folder, [], 0, 0, 0, 0, [], cancelled=False, error=None)
@@ -397,7 +447,8 @@ class Generator(QObject):
         for chapter_id in chapter_ids:
             try:
                 result = generate_chapter(
-                    self._db, self._pipeline, config, chapter_id, folder, fmt, translate_missing, self._stop, on_page
+                    self._db, self._pipeline, config, chapter_id, folder, fmt, translate_missing, self._stop, on_page,
+                    inpaint=inpaint,
                 )
             except (TranslationError, PipelineError) as exc:
                 summary.error = str(exc)
@@ -422,8 +473,10 @@ class Generator(QObject):
 # --- linha de comando -----------------------------------------------------------------------
 
 
-def run_cli(folder: str, works: list[str] | None, chapters: list[str] | None, fmt: str, translate_missing: bool) -> int:
-    """`--gerar PASTA --obra NOME [--capitulo NOME…] [--formato cbz|pasta] [--traduzir-faltantes]`."""
+def run_cli(
+    folder: str, works: list[str] | None, chapters: list[str] | None, fmt: str, translate_missing: bool, inpaint: bool = False
+) -> int:
+    """`--gerar PASTA --obra NOME [--capitulo NOME…] [--formato cbz|pasta] [--traduzir-faltantes] [--reconstruir]`."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtGui import QGuiApplication
 
@@ -454,7 +507,7 @@ def run_cli(folder: str, works: list[str] | None, chapters: list[str] | None, fm
             for chapter in chosen:
                 result = generate_chapter(
                     db, pipeline, work_config(config, work), chapter.id, Path(folder), fmt, translate_missing,
-                    threading.Event(), status=lambda message: print(message, file=sys.stderr),
+                    threading.Event(), status=lambda message: print(message, file=sys.stderr), inpaint=inpaint,
                 )
                 extra = f", {result.translated} traduzida(s) agora" if result.translated else ""
                 left = f", {result.untranslated} sem tradução" if result.untranslated else ""
