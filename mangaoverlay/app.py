@@ -578,10 +578,8 @@ class MangaOverlayApp(QObject):
     # --- captura e tradução ---------------------------------------------------
 
     def _run(self, fn, *args, on_done, on_failed) -> None:
-        # Nenhum objeto Qt por tarefa: a thread de trabalho só emite o sinal do próprio app, que vive até o fim.
-        # Antes, cada tarefa criava um QObject de sinais e a função da thread guardava uma referência a ele; quando
-        # a última referência sumia na thread de trabalho, o Python apagava ali um objeto da thread principal (às
-        # vezes com um aviso ainda na fila dela), e o Windows abortava o app por corrupção de heap (0xC0000374).
+        # Nenhum objeto Qt por tarefa: a thread de trabalho só emite o sinal do próprio app, que vive até o fim, e o
+        # resultado chega à thread principal pela fila de eventos do Qt (a causa do crash no Windows está em _Worker).
         job_id = next(self._job_ids)
         self._jobs[job_id] = (on_done, on_failed)
         finished = self._job_finished.emit
@@ -706,6 +704,7 @@ class MangaOverlayApp(QObject):
     # --- encerramento ---------------------------------------------------------
 
     def quit(self) -> None:
+        self._batch_poll.stop()  # o banco vai ser fechado; a conferência da Batch API não pode disparar depois
         self.hotkeys.stop()
         self._ipc.close()
         self.hide_translation()

@@ -44,6 +44,9 @@ def _prepare_streams() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _prepare_streams()
+    # O NLLB e o manga-ocr só têm pytorch_model.bin no repositório. Depois de carregar o .bin, o transformers
+    # baixava em segundo plano uma cópia em .safetensors "para a próxima vez": ~2,7 GB a mais, sem uso.
+    os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
     if sys.platform == "win32":
         # Sem o modo de desenvolvedor, o Windows não cria symlinks: o cache do Hugging Face copia os arquivos e avisa
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
