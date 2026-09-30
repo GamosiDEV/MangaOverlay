@@ -605,11 +605,17 @@ def _where(lines: list[SourceLine]) -> str:
     if not lines:
         return "sem falas"
     first, last = lines[0], lines[-1]
+    a, b = _short(first.chapter), _short(last.chapter)
     if (first.chapter, first.page) == (last.chapter, last.page):
-        return f"{first.chapter}, p. {first.page}"
+        return f"{a}, p. {first.page}"
     if first.chapter == last.chapter:
-        return f"{first.chapter}, p. {first.page} a {last.page}"
-    return f"{first.chapter}, p. {first.page} a {last.chapter}, p. {last.page}"
+        return f"{a}, p. {first.page} a {last.page}"
+    return f"{a}, p. {first.page} a {b}, p. {last.page}"
+
+
+def _short(chapter: str, limit: int = 40) -> str:
+    """Nomes de pasta de scan costumam ser enormes; no log basta o começo."""
+    return chapter if len(chapter) <= limit else chapter[: limit - 1].rstrip() + "…"
 
 
 def _usage_tuple(usage: Usage) -> tuple[int, int, int]:

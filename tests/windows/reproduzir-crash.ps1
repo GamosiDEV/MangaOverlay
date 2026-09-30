@@ -42,7 +42,8 @@ Start-Sleep -Seconds 3
 
 $crashes = 0
 foreach ($rodada in 1..$Rodadas) {
-    Remove-Item $Log -ErrorAction SilentlyContinue
+    # O log é do app instalado e acumula entre execuções: mostra só o que esta rodada acrescentar
+    $inicio = if (Test-Path $Log) { @(Get-Content $Log -Encoding UTF8).Count } else { 0 }
     $app = Start-Process $Pythonw -ArgumentList "`"$Main`"" -WorkingDirectory (Split-Path $Main) -PassThru
     Start-Sleep -Seconds $Aquecimento
     foreach ($n in 1..$Traducoes) {
@@ -57,7 +58,8 @@ foreach ($rodada in 1..$Rodadas) {
     Write-Host "=== rodada ${rodada}: fechou sozinho = $($app.HasExited), código = $codigo ===" -ForegroundColor $cor
     if ($app.HasExited) { $crashes++ } else { Stop-Process -Id $app.Id -Force }
     if (Test-Path $Log) {
-        Get-Content $Log -Encoding UTF8 | Select-String -NotMatch 'HF_TOKEN|pin_memory|super\(\).__init__|max_new_tokens'
+        Get-Content $Log -Encoding UTF8 | Select-Object -Skip $inicio |
+            Select-String -NotMatch 'HF_TOKEN|pin_memory|super\(\).__init__|max_new_tokens'
     }
 }
 Stop-Process -Id $paint.Id -ErrorAction SilentlyContinue

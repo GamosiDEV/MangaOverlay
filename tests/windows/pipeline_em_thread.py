@@ -27,6 +27,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 faulthandler.enable(all_threads=True)
+if "--qt-primeiro" in sys.argv:
+    # Como o app: o PySide6 (com o próprio runtime do Visual C++) carrega antes do PyTorch
+    import PySide6.QtWidgets  # noqa: F401
 
 
 def main() -> int:
@@ -35,6 +38,7 @@ def main() -> int:
     parser.add_argument("--vezes", type=int, default=6)
     parser.add_argument("--cpu", action="store_true", help="não usa a GPU")
     parser.add_argument("--uma-thread", action="store_true", help="torch.set_num_threads(1) (testa conflito de OpenMP)")
+    parser.add_argument("--qt-primeiro", action="store_true", help="importa o PySide6 antes do PyTorch, como o app")
     args = parser.parse_args()
 
     from PIL import Image

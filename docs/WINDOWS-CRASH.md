@@ -1,106 +1,61 @@
-# Crash no Windows ao traduzir a tela (0xC0000374)
+# Crash no Windows ao traduzir a tela (0xC0000374) — resolvido
 
-Nota de 29/09/2026 para continuar a investigação num Windows de verdade. Os testes foram feitos em máquinas Windows do GitHub Actions (Windows Server, sem GPU, PyTorch na CPU) e interrompidos para não gastar mais minutos da CI.
-
-**Situação:** a release `v0.1.0` não saiu. A tag `v0.1.0` existe no GitHub, mas aponta para um commit com o bug, e o job do Windows no workflow `Instalador` barrou a publicação. Antes de publicar: resolver o crash, apagar a tag (`git push origin :refs/tags/v0.1.0` e `git tag -d v0.1.0`) e criá-la de novo no commit corrigido.
+Registro do problema que impediu a release `v0.1.0`, da causa e de como verificar, para o caso de algo parecido voltar. Investigado entre 29/09/2026 e 30/09/2026: primeiro nas máquinas Windows do GitHub Actions (sem GPU), depois resolvido num Windows 11 com GTX 1050 Ti.
 
 ## Sintoma
 
-O app fecha sozinho, sem mensagem, pouco depois de traduzir a tela (atalho Ctrl+Alt+M ou `--translate`). Código de saída `0xC0000374` (corrupção de heap); uma vez, `0xC0000005` (violação de acesso).
+O app fechava sozinho, sem mensagem, logo depois de traduzir a tela (atalho Ctrl+Alt+M ou `--translate`), em geral na primeira tradução depois de abrir. Código de saída `0xC0000374` (corrupção de heap) e, às vezes, `0xC0000005` (violação de acesso), com a pilha parando no pré-processamento de imagem do detector (`torchvision.transforms.functional.pil_to_tensor`).
 
-- Acontecia em quase todas as rodadas (atalho a cada 30 s).
-- Na primeira execução da CI passou uma vez: é intermitente.
-- O `--image` (traduzir um arquivo pela linha de comando) **nunca** quebrou, com o mesmo pipeline e os mesmos modelos.
-- No Linux não aparece. O heap do Windows detecta a corrupção e aborta; o glibc em geral não percebe.
+- Acontecia com GPU e na CPU, em quase todas as tentativas.
+- O `--image` nunca quebrava, com o mesmo pipeline e os mesmos modelos.
+- No Linux não aparecia (o heap do glibc não detecta esse tipo de corrupção como o do Windows).
 
-Com o `faulthandler` ligado (já no código), o log mostra a pilha de todas as threads no momento do crash. Quase sempre nenhuma thread estava executando Python do app. Numa vez, a violação de acesso veio dentro do `torchvision` (pré-processamento de imagem do detector) na thread de trabalho, ou seja, a memória já estava corrompida antes.
+## Causa
 
-## O que já foi descartado
+O app rodava os modelos num `QThreadPool` do Qt, **uma tarefa por vez, cada uma separada**: o aquecimento dos modelos era uma tarefa, cada tradução da tela outra.
 
-Cada linha é uma variante rodada na CI, com 3 aberturas do app e 3 traduções em cada:
+A thread do `QThreadPool` não é uma thread do Python. A cada tarefa, o PySide cria um estado de thread do Python (`PyThreadState`) e o destrói no fim. O PyTorch, pelo pybind11, guarda um ponteiro para esse estado numa variável local da thread (TLS). Na tarefa seguinte, na mesma thread do sistema, o ponteiro aponta para memória já liberada, e o PyTorch corrompe o heap ao usá-lo.
 
-| Variante | Resultado | Conclusão |
+Por isso quebrava sempre na **segunda tarefa** que usava os modelos na mesma thread do pool:
+
+| Situação | Tarefas na mesma thread do pool | Resultado |
 |---|---|---|
-| App aberto, sem traduzir nada | sem crash | Carregar os modelos não basta |
-| Sem os atalhos do `pynput` | crash 3/3 | Não é o `pynput` |
-| Só comandos `--hide` pela IPC, sem traduzir | sem crash | Não é a IPC (named pipe) |
-| Traduzir pelo atalho, sem IPC | crash 3/3 | Não é a IPC |
-| Sem a sobreposição (nada desenhado na tela) | crash 2/3 | Não é a sobreposição |
-| Captura trocada por um PNG | crash 3/3 | Não é a captura de tela |
-| Tudo igual, mas **sem rodar o pipeline** | sem crash (9 traduções) | **É o pipeline (modelos) no app** |
-| Tarefas passadas como função em vez de subclasse de `QRunnable` | crash 5/6 | Não era o `autoDelete` do `QRunnable` (a mudança ficou, é inofensiva) |
-| Thread do pool que nunca expira (`setExpiryTimeout(-1)`), modelos sempre na mesma thread | crash 6/6, já na 1ª tradução | Não é a troca de thread entre tarefas |
+| App normal | aquecimento, depois 1ª tradução | crash na 1ª tradução |
+| App sem aquecimento | 1ª tradução, depois 2ª | crash na 2ª tradução |
+| Script com o laço inteiro numa tarefa só | uma | nunca quebra |
+| `--image` | nenhuma (thread principal) | nunca quebra |
 
-## Onde está o problema
+A importação de capítulos e a tradução em lote não têm o problema: rodam em `threading.Thread`, e o estado de thread do Python dura a vida inteira da thread.
 
-O pipeline (detecção, OCR e NLLB, no PyTorch da CPU) **quebra quando roda na thread de trabalho do app** (`QThreadPool`, com o loop de eventos do Qt rodando na thread principal) e **nunca quebrou na thread principal** (`--image`). Na última variante, o app quebrava já na primeira tradução, antes de terminar de processar a tela.
+## Correção
 
-Não se sabe ainda se a causa é:
+`mangaoverlay/app.py`: o `QThreadPool` foi trocado por `_Worker`, uma `threading.Thread` do Python permanente que executa as tarefas de uma fila, uma por vez. O resultado volta para a thread principal por um sinal do próprio app (`_job_finished`), sem objeto Qt por tarefa.
 
-- **qualquer thread que não seja a principal**, até uma `threading.Thread` pura, sem Qt;
-- **o Qt rodando ao mesmo tempo** (o loop de eventos na principal enquanto o PyTorch trabalha na outra);
-- **conflito entre bibliotecas OpenMP** (a do PyTorch e as que vêm com o OpenCV, o SciPy e o ONNX), que só aparece com mais de uma thread chamando essas bibliotecas.
+**Regra para o futuro:** código que usa o PyTorch (ou outra extensão com pybind11) não deve rodar em `QThreadPool`/`QRunnable`. Use `threading.Thread`.
 
-## Como testar no Windows
+## Verificação (Windows 11, GTX 1050 Ti, PyTorch 2.11 cu126)
 
-Instale pelo `instalar-windows.cmd` deste branch (ou use um ambiente próprio, veja o README). Os comandos abaixo rodam da pasta do repositório; `PY` é o Python do ambiente instalado:
+| Teste | Antes | Depois |
+|---|---|---|
+| `tests/windows/app_ciclo.py` (app completo, 6 traduções), GPU | crash 3/3 | 18 traduções em 3 execuções, sem crash |
+| O mesmo, na CPU | crash | 6 traduções, sem crash |
+| `tests/windows/reproduzir-crash.ps1` (app real, captura da tela, atalho físico, pausas de 30 s) | crash 3/3 rodadas | 9 traduções em 3 rodadas, sem crash |
+| Importação (`Importer`) de um capítulo de 56 páginas e tradução em lote com o NLLB (`BatchRunner`), GPU | — | 56 páginas, 139 falas lidas, 6/6 blocos traduzidos, sem crash |
+
+## Como verificar de novo
+
+Da pasta do repositório, com o Python do ambiente instalado:
 
 ```powershell
 $PY = "$env:LOCALAPPDATA\Programs\MangaOverlay\.venv\Scripts\python.exe"
+& $PY tests\windows\app_ciclo.py --imagem tests\fixtures\pagina-sintetica.png          # rápido, sem mexer no teclado
+powershell -ExecutionPolicy Bypass -File tests\windows\reproduzir-crash.ps1 -Main .\main.py   # app real, aperta o atalho sozinho
 ```
 
-### 1. Diagnóstico rápido, sem o app (alguns minutos)
+`app_ciclo.py` abre o app de verdade e traduz em ciclos; as opções `--sem-aquecimento`, `--sem-atalhos`, `--sem-sobreposicao`, `--sem-janela`, `--sem-banco`, `--sem-lote`, `--sem-ipc` e `--cpu` desligam partes do app, para isolar um problema novo. `pipeline_em_thread.py` roda só o pipeline, na thread principal, numa `threading.Thread`, com o Qt rodando ou num `QThreadPool`.
 
-`tests\windows\pipeline_em_thread.py` roda o pipeline na página de teste 6 vezes, no modo escolhido. Rode cada modo e anote qual quebra (o processo fecha com `0xC0000374` e o `faulthandler` mostra as pilhas):
+Num crash nativo, o `faulthandler` (ligado no app) grava a pilha de todas as threads em `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log`.
 
-```powershell
-& $PY tests\windows\pipeline_em_thread.py principal --cpu    # como o --image: não deve quebrar
-& $PY tests\windows\pipeline_em_thread.py thread --cpu       # threading.Thread, sem Qt
-& $PY tests\windows\pipeline_em_thread.py qt-thread --cpu    # threading.Thread, com o Qt rodando
-& $PY tests\windows\pipeline_em_thread.py pool --cpu         # QThreadPool, como o app
-& $PY tests\windows\pipeline_em_thread.py pool --cpu --uma-thread   # idem, com torch.set_num_threads(1)
-```
+## Pistas que não eram a causa
 
-Como ler o resultado:
-
-| Quebra em | Não quebra em | Provável causa | Correção |
-|---|---|---|---|
-| `thread`, `qt-thread` e `pool` | `principal` | PyTorch fora da thread principal | Rodar os modelos na thread principal, ou num processo separado |
-| `qt-thread` e `pool` | `principal` e `thread` | Qt e PyTorch ao mesmo tempo | Mesma do anterior, ou isolar o PyTorch num processo |
-| `pool` | `pool --uma-thread` | Conflito de OpenMP | `torch.set_num_threads(1)` ou `OMP_NUM_THREADS=1` no Windows (medir a perda de velocidade) |
-| nenhum | | O crash depende de algo do app que o script não tem (captura, sobreposição, bandeja) | Voltar ao script do item 2 e desligar partes do app |
-
-Tire `--cpu` para testar também com a GPU NVIDIA. A CI só testou a CPU, e o crash pode nem acontecer com CUDA.
-
-### 2. Reproduzir no app
-
-`tests\windows\reproduzir-crash.ps1` abre a página de teste no Paint, abre o app, aperta Ctrl+Alt+M 3 vezes com 30 s de pausa, repete 3 vezes e mostra o log de cada rodada:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tests\windows\reproduzir-crash.ps1
-```
-
-Parâmetros: `-Rodadas`, `-Traducoes`, `-Pausa` (segundos), `-Aquecimento`; `-Python` e `-Main` para usar um ambiente próprio em vez do instalado. Use-o para confirmar a correção: umas 5 rodadas (`-Rodadas 5`) sem crash, porque o erro é intermitente.
-
-### Logs
-
-- App: `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log` (inclui a pilha do `faulthandler` num crash nativo e uma linha por tela processada).
-- Rodar com `python.exe` no lugar de `pythonw.exe` mostra a saída direto no console.
-
-### Se nada disso achar a causa
-
-Ligue o *page heap* do Windows para o Python do ambiente, com o `gflags` do Debugging Tools for Windows (`gflags /p /enable python.exe /full`). O crash passa a acontecer na instrução que escreve fora do lugar, não quando a corrupção é detectada, e um dump no WinDbg mostra a biblioteca culpada. Vale também testar o PyTorch 2.10 e o Python 3.13 (o instalador usa 2.11 e 3.12).
-
-### Depois de corrigir
-
-A importação de capítulos (`Importer`) e a tradução em lote com o NLLB (`BatchRunner`) também usam os modelos fora da thread principal (em `threading.Thread`). Teste as duas no Windows: importe alguns capítulos e rode um lote com o motor offline. Se a correção for "modelos numa thread só", o ideal é uma thread (ou processo) dedicada a tudo que usa o PyTorch, recebendo tarefas por uma fila.
-
-Com o crash resolvido, o job do Windows no workflow `Instalador` volta a passar, e a release pode sair (veja **Situação**, no começo).
-
-## O que já está pronto neste branch
-
-Independente do crash:
-
-- Log detalhado da tradução em lote ("Mostrar detalhes" na janela do lote, arquivo `traducao-em-lote.log`), testado no Linux com erros simulados.
-- `faulthandler` ligado e uma linha no log do app por tela processada ou falha.
-- Falha no resumo da memória da obra passa a aparecer no log do lote.
+Descartadas durante a investigação, cada uma com teste próprio: o `pynput` (atalhos), a IPC por named pipe, a janela da sobreposição, a captura de tela, a ordem de importação do Qt e do PyTorch (o PySide6 traz o runtime do Visual C++ 14.44 e o Windows tem o 14.51), o cache de blocos do Pillow, o banco SQLite, a bandeja e as notificações, a expiração da thread ociosa do pool (`setExpiryTimeout(-1)` não resolveu) e o `autoDelete` do `QRunnable`.

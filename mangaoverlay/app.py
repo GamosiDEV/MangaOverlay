@@ -5,13 +5,17 @@ atalho (traduzir de novo ou esconder).
 """
 
 import ctypes.util
+import itertools
 import os
+import queue
 import signal
 import sys
+import threading
+import traceback
 from dataclasses import replace
 from datetime import datetime
 
-from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QCursor, QGuiApplication
 from pathlib import Path
 
@@ -44,14 +48,41 @@ def _log(message: str) -> None:
     print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}", file=sys.stderr, flush=True)
 
 
-class _JobSignals(QObject):
-    done = Signal(object)
-    failed = Signal(object)
+class _Worker:
+    """Uma thread do Python, sempre a mesma, que executa em ordem tudo o que usa os modelos.
+
+    Não pode ser um QThreadPool: a thread dele não é do Python, e o PySide cria e destrói o estado de thread do
+    Python a cada tarefa. O PyTorch (pybind11) guarda um ponteiro para esse estado; na tarefa seguinte ele
+    aponta para memória liberada, e o Windows abortava o app por corrupção de heap (0xC0000374) na segunda
+    tarefa (em geral, a primeira tradução depois do aquecimento). Numa threading.Thread o estado dura a vida
+    inteira da thread.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._loop, name="modelos", daemon=True)
+        self._thread.start()
+
+    def start(self, fn) -> None:
+        self._queue.put(fn)
+
+    def stop(self, timeout: float) -> None:
+        """Termina a tarefa atual e as que estiverem na fila (até `timeout` segundos) e encerra a thread."""
+        self._queue.put(None)
+        self._thread.join(timeout)
+
+    def _loop(self) -> None:
+        while (fn := self._queue.get()) is not None:
+            try:
+                fn()
+            except Exception:  # as tarefas de _run tratam os próprios erros; isto só evita matar a thread
+                traceback.print_exc()
 
 
 class MangaOverlayApp(QObject):
     ipc_command = Signal(str)
     status = Signal(str)  # mensagens do processamento (emitidas da thread de trabalho)
+    _job_finished = Signal(int, bool, object)  # tarefa, deu certo, resultado ou exceção (ver _run)
 
     def __init__(self, qapp: QApplication):
         super().__init__()
@@ -66,10 +97,11 @@ class MangaOverlayApp(QObject):
         if self.db.work(self.config.current_work) is None:
             self.config.current_work = None  # obra apagada ou banco novo
         self.pipeline = Pipeline(self.db)
-        # Uma tarefa por vez: os modelos na GPU não são usados em paralelo
-        self._pool = QThreadPool(self)
-        self._pool.setMaxThreadCount(1)
-        self._running_jobs: set[_JobSignals] = set()
+        # Uma tarefa por vez, sempre na mesma thread: os modelos na GPU não são usados em paralelo
+        self._worker = _Worker()
+        self._jobs: dict[int, tuple] = {}  # tarefa -> (on_done, on_failed)
+        self._job_ids = itertools.count(1)
+        self._job_finished.connect(self._on_job_finished, Qt.ConnectionType.QueuedConnection)
         self._overlays: dict[str, OverlayWindow] = {}
         self._busy = False
         self._settings_open = False
@@ -232,7 +264,7 @@ class MangaOverlayApp(QObject):
         dialog.setWindowIcon(app_icon())
         if dialog.exec() == NameReviewDialog.DialogCode.Accepted and dialog.applied:
             # A leitura guarda traduções na memória da sessão: esvazia para mostrar as corrigidas
-            self._pool.start(lambda: self.pipeline.clear_cache())
+            self._worker.start(lambda: self.pipeline.clear_cache())
             self._notify(f"{dialog.applied} tradução(ões) corrigida(s).", 5000)
 
     def _open_memory(self) -> None:
@@ -484,7 +516,7 @@ class MangaOverlayApp(QObject):
             return
         # Na fila de trabalho, para não apagar no meio de uma tradução
         work_id = self.config.current_work
-        self._pool.start(lambda: self.pipeline.clear_cache(work_id, True))
+        self._worker.start(lambda: self.pipeline.clear_cache(work_id, True))
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -546,27 +578,27 @@ class MangaOverlayApp(QObject):
     # --- captura e tradução ---------------------------------------------------
 
     def _run(self, fn, *args, on_done, on_failed) -> None:
-        # O pool recebe uma função comum, não uma subclasse de QRunnable: com autoDelete, o Qt apagava o
-        # QRunnable na thread de trabalho enquanto o Python ainda tinha o objeto, e o Windows abortava o
-        # processo por corrupção de heap (0xC0000374). Os sinais ficam só do lado do Python, na thread principal.
-        signals = _JobSignals()
-        self._running_jobs.add(signals)
-
-        def finish(handler, value):
-            self._running_jobs.discard(signals)
-            handler(value)
+        # Nenhum objeto Qt por tarefa: a thread de trabalho só emite o sinal do próprio app, que vive até o fim.
+        # Antes, cada tarefa criava um QObject de sinais e a função da thread guardava uma referência a ele; quando
+        # a última referência sumia na thread de trabalho, o Python apagava ali um objeto da thread principal (às
+        # vezes com um aviso ainda na fila dela), e o Windows abortava o app por corrupção de heap (0xC0000374).
+        job_id = next(self._job_ids)
+        self._jobs[job_id] = (on_done, on_failed)
+        finished = self._job_finished.emit
 
         def work() -> None:
             try:
                 result = fn(*args)
             except Exception as exc:
-                signals.failed.emit(exc)
+                finished(job_id, False, exc)
             else:
-                signals.done.emit(result)
+                finished(job_id, True, result)
 
-        signals.done.connect(lambda value: finish(on_done, value))
-        signals.failed.connect(lambda exc: finish(on_failed, exc))
-        self._pool.start(work)
+        self._worker.start(work)
+
+    def _on_job_finished(self, job_id: int, ok: bool, value: object) -> None:
+        on_done, on_failed = self._jobs.pop(job_id)
+        (on_done if ok else on_failed)(value)
 
     def _on_hotkey(self, action: str) -> None:
         if action == "hide":
@@ -682,7 +714,7 @@ class MangaOverlayApp(QObject):
         self.batch_runner.interrupt()  # idem: o lote continua ativo e volta ao abrir o app
         self.importer.wait(10)
         self.batch_runner.wait(10)
-        self._pool.waitForDone(5000)  # não fecha o banco no meio de uma gravação
+        self._worker.stop(5)  # não fecha o banco no meio de uma gravação
         self.db.close()
         self._qapp.quit()
 
