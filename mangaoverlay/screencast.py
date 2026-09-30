@@ -51,6 +51,7 @@ class ScreenCastSource:
         self._stopped = False
         self._conn = None
         self._procs: list[subprocess.Popen] = []
+        self._done = threading.Event()
         threading.Thread(target=self._run, name="screencast", daemon=True).start()
 
     def latest(self) -> Thumbs | None:
@@ -61,6 +62,7 @@ class ScreenCastSource:
 
     def stop(self) -> None:
         self._stopped = True
+        self._done.set()
         for proc in self._procs:
             proc.kill()
         if self._conn is not None:
@@ -112,11 +114,15 @@ class ScreenCastSource:
                 "!", "videorate", "!", "video/x-raw,framerate=2/1", "!", "videoconvert", "!", "videoscale", "!",
                 f"video/x-raw,format=GRAY8,width={THUMB_WIDTH},height={thumb_height}", "!", "fdsink", "fd=1", "sync=false",
             ]
-            proc = subprocess.Popen(pipeline, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=(raw,))
+            proc = subprocess.Popen(
+                pipeline, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=(raw,), preexec_fn=_die_with_parent
+            )
             self._procs.append(proc)
             threading.Thread(
                 target=self._read_frames, args=(proc, f"stream-{node}", thumb_height), name=f"screencast-{node}", daemon=True
             ).start()
+        # O aviso de "pai morreu" (_die_with_parent) vale para a thread que criou os processos: ela fica viva até stop()
+        self._done.wait()
 
     def _read_frames(self, proc: subprocess.Popen, name: str, height: int) -> None:
         size = THUMB_WIDTH * height  # GRAY8 com largura múltipla de 4: sem sobra no fim das linhas
@@ -160,6 +166,16 @@ class ScreenCastSource:
 
 class _Denied(Exception):
     """O usuário cancelou o diálogo de compartilhar a tela."""
+
+
+def _die_with_parent() -> None:
+    """No processo filho: se o app morrer (até num kill), o Linux encerra o gst-launch e o compartilhamento de tela
+    acaba junto. Sem isso, a transmissão continuava depois do app fechado à força."""
+    import ctypes
+    import signal
+
+    PR_SET_PDEATHSIG = 1
+    ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
 
 
 def _token() -> str:

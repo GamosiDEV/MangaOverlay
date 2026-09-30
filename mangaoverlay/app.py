@@ -872,6 +872,7 @@ class MangaOverlayApp(QObject):
         self._start(translate=True, colorize=self.config.colorize, auto=True)  # traduz o que já está na tela
 
     def _on_page_changed(self) -> None:
+        _log("Tempo real: a tela mudou")
         self.hide_translation()  # a tradução antiga ficaria fora do lugar durante a rolagem ou na página nova
 
     def _on_page_settled(self) -> None:
