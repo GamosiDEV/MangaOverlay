@@ -41,8 +41,10 @@ class FakePipeline:
     def __init__(self, db: Database):
         self.db = db
         self.translated: list[str] = []
+        self.layouts = 0  # páginas em que o detector teria rodado
 
     def page_layout(self, image, boxes, config):
+        self.layouts += 1
         return [Region(b, b, (b[0] - 30, b[1] - 30, b[2] + 30, b[3] + 30)) for b in boxes]
 
     def translate_stored(self, image, regions, pending, config, status=None):
@@ -169,3 +171,12 @@ def test_traducao_feita_com_outro_idioma_de_origem(setup):
     db.save_translations(TranslationKey(work.id, "en", "pt", "openai-text", "gpt-4.1-mini"), [("ここはどこ", "Onde estamos?")])
     result, _ = _generate(setup)
     assert (result.drawn, result.untranslated) == (2, 0)
+
+
+def test_balao_guardado_na_importacao_dispensa_o_detector(setup):
+    db, work, chapter, _out = setup
+    first = db.stored_pages(chapter)[0]
+    db.save_page_texts(first.id, [(TEXT, "お前は誰だ", ((40, 40, 160, 160), (30, 30, 170, 170)))])
+    assert db.stored_pages(chapter)[0].layouts == [((40, 40, 160, 160), (30, 30, 170, 170))]
+    result, pipeline = _generate(setup)
+    assert result.drawn == 1 and pipeline.layouts == 0

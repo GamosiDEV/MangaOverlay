@@ -162,3 +162,16 @@ def test_arquivo_sem_lista_de_partes_tem_todas(tmp_path):
     data = transfer.read_data(tmp_path / "e.zip")
     del data["partes"]
     assert transfer.parts_of(data) == list(transfer.PARTS)
+
+
+def test_formas_dos_baloes_vao_junto(tmp_path):
+    source = Database(tmp_path / "origem.db")
+    work = source.create_work("Obra F", "ja")
+    source.add_chapter(work.id, "Cap 1", 1, "/mangas/f/cap1", ["01.png"])
+    page = source.pending_pages(work.id)[0]
+    source.save_page_texts(page.id, [((10, 20, 110, 220), "お前は誰だ", ((5, 15, 115, 225), (0, 10, 120, 230))), ((200, 20, 300, 220), "ここ", ((200, 20, 300, 220), None))])
+    transfer.export_data(source, tmp_path / "f.zip", [work.id])
+    target = Database(tmp_path / "destino.db")
+    transfer.import_data(target, transfer.read_data(tmp_path / "f.zip"))
+    chapter = target.chapters(target.works()[0].id)[0]
+    assert target.stored_pages(chapter.id)[0].layouts == [((5, 15, 115, 225), (0, 10, 120, 230)), ((200, 20, 300, 220), None)]

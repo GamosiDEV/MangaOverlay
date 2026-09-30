@@ -157,6 +157,11 @@ _MIGRATIONS = [
     ALTER TABLE capitulos ADD COLUMN resumido INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE requisicoes ADD COLUMN sincrona INTEGER NOT NULL DEFAULT 0;
     """,
+    # 7: balão e área de escrita de cada fala (JSON {"area": [...], "balao": [...] ou null}), achados na importação:
+    # gerar o capítulo traduzido não precisa rodar o detector de novo. NULL nas falas importadas antes disto.
+    """
+    ALTER TABLE regioes ADD COLUMN forma TEXT;
+    """,
 ]
 
 
@@ -200,6 +205,8 @@ class StoredPage:
     file: str
     state: str  # "pendente", "lida" ou "erro"
     regions: list[tuple[tuple[int, int, int, int], str]]
+    # (área de escrita, balão ou None) de cada fala; None se foi importada antes de o banco guardar isso
+    layouts: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None] | None]
 
 
 @dataclass(frozen=True)
@@ -324,6 +331,17 @@ def _one_edit_apart(a: str, b: str) -> bool:
 def normalize(text: str) -> str:
     """Forma canônica do texto lido pelo OCR: NFKC (largura dos caracteres) e sem espaços."""
     return "".join(unicodedata.normalize("NFKC", text).split())
+
+
+def _layout(shape: str | None) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None] | None:
+    """A coluna `forma` de uma fala: (área de escrita, balão ou None). None se estiver vazia ou ilegível."""
+    if not shape:
+        return None
+    try:
+        data = json.loads(shape)
+        return tuple(data["area"]), tuple(data["balao"]) if data.get("balao") else None
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 class Database:
@@ -586,17 +604,22 @@ class Database:
             rows = self._conn.execute(query, params).fetchall()
         return [PendingPage(*row) for row in rows]
 
-    def save_page_texts(self, page_id: int, regions: list[tuple[tuple[int, int, int, int], str]]) -> None:
-        """Grava o texto lido de cada balão (na ordem de leitura) e marca a página como lida.
+    def save_page_texts(self, page_id: int, regions: list[tuple]) -> None:
+        """Grava o texto lido de cada balão (na ordem de leitura) e marca a página como lida. Cada fala é
+        (caixa, texto) ou (caixa, texto, (área de escrita, balão ou None)).
 
         Substitui o que houver: reprocessar uma página nunca duplica balões.
         """
+        rows = []
+        for order, (box, text, *layout) in enumerate(regions, start=1):
+            shape = json.dumps({"area": list(layout[0][0]), "balao": list(layout[0][1]) if layout[0][1] else None}) if layout else None
+            rows.append((page_id, order, *box, text, shape))
         with self._lock:
             self._conn.execute("BEGIN")
             self._conn.execute("DELETE FROM regioes WHERE pagina_id = ?", (page_id,))
             self._conn.executemany(
-                "INSERT INTO regioes (pagina_id, ordem, x0, y0, x1, y1, texto_original) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(page_id, order, *box, text) for order, (box, text) in enumerate(regions, start=1)],
+                "INSERT INTO regioes (pagina_id, ordem, x0, y0, x1, y1, texto_original, forma) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
             )
             self._conn.execute("UPDATE paginas SET estado = 'lida', erro = NULL WHERE id = ?", (page_id,))
             self._conn.execute("COMMIT")
@@ -761,14 +784,19 @@ class Database:
                 (chapter_id,),
             ).fetchall()
             rows = self._conn.execute(
-                """SELECT r.pagina_id, r.x0, r.y0, r.x1, r.y1, r.texto_original FROM regioes r
+                """SELECT r.pagina_id, r.x0, r.y0, r.x1, r.y1, r.texto_original, r.forma FROM regioes r
                    JOIN paginas p ON p.id = r.pagina_id WHERE p.capitulo_id = ? ORDER BY p.numero, r.ordem""",
                 (chapter_id,),
             ).fetchall()
-        regions: dict[int, list[tuple[tuple[int, int, int, int], str]]] = {}
-        for page_id, x0, y0, x1, y1, text in rows:
+        regions: dict[int, list] = {}
+        layouts: dict[int, list] = {}
+        for page_id, x0, y0, x1, y1, text, shape in rows:
             regions.setdefault(page_id, []).append(((x0, y0, x1, y1), text))
-        return [StoredPage(i, number, origin, file, state, regions.get(i, [])) for i, number, origin, file, state in pages]
+            layouts.setdefault(page_id, []).append(_layout(shape))
+        return [
+            StoredPage(i, number, origin, file, state, regions.get(i, []), layouts.get(i, []))
+            for i, number, origin, file, state in pages
+        ]
 
     def create_batch(
         self,

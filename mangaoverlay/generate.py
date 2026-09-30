@@ -26,9 +26,9 @@ from PySide6.QtCore import QObject, Signal
 
 from . import pricing
 from .config import VISION_ENGINES, Config
-from .db import Database, TranslationKey, Work, normalize
+from .db import Database, StoredPage, TranslationKey, Work, normalize
 from .detector import Region
-from .pipeline import ALL_ENGINES, OverlayItem, Pipeline, PipelineError, _background, _expand
+from .pipeline import ALL_ENGINES, OverlayItem, Pipeline, PipelineError, _background, _expand, box_paper, bubble_shape
 from .sources import load_page
 from .translators import TranslationError, llm_instructions
 
@@ -114,7 +114,7 @@ def estimate_missing(
 
 
 def render_page(
-    image: Image.Image, regions: list[Region], texts: list[str], translations: dict[str, str], font
+    image: Image.Image, regions: list[Region], texts: list[str], translations: dict[str, str], font, language: str = ""
 ) -> tuple[Image.Image, int]:
     """A página com as traduções desenhadas (mesmo desenho do overlay) e quantas falas foram desenhadas."""
     from PySide6.QtGui import QImage, QPainter
@@ -130,7 +130,11 @@ def render_page(
         if not translation or translation.casefold() == text.casefold():
             continue
         fill = _expand(region.text_box, image.size)
-        items.append(OverlayItem(fill, region.area, translation, text, _background(frame, fill), region.bubble))
+        background = _background(frame, fill)
+        shape = bubble_shape(frame, region.bubble, background) if region.bubble else "ellipse"
+        if shape == "rect":
+            background = box_paper(frame, region.bubble)
+        items.append(OverlayItem(fill, region.area, translation, text, background, region.bubble, shape=shape, language=language))
     if not items:
         return image, 0
     canvas = pil_to_qimage(image).convertToFormat(QImage.Format.Format_RGB32)
@@ -259,7 +263,7 @@ def generate_chapter(
                 result.problems.append(f"{chapter_name}, página {page.number}: {exc or exc.__class__.__name__}")
                 continue
             if page.regions:
-                image = _translated_page(db, pipeline, config, key, image, page.regions, translate_missing, result, status)
+                image = _translated_page(db, pipeline, config, key, image, page, translate_missing, result, status)
             output.add(f"{index:0{digits}d}.jpg", encode_page(image))
             result.pages += 1
         if not result.pages:  # nenhuma página abriu: um capítulo vazio não serve para nada
@@ -281,13 +285,13 @@ def _translated_page(
     config: Config,
     key: TranslationKey,
     image: Image.Image,
-    stored: list[tuple[tuple[int, int, int, int], str]],
+    page: StoredPage,
     translate_missing: bool,
     result: ChapterResult,
     status: Callable[[str], None],
 ) -> Image.Image:
-    boxes = [box for box, _t in stored]
-    texts = [text for _b, text in stored]
+    boxes = [box for box, _t in page.regions]
+    texts = [text for _b, text in page.regions]
     translations = saved_translations(db, key, texts)
     pending = [(i, t) for i, t in enumerate(texts) if normalize(t) and normalize(t) not in translations]
     if pending and translate_missing:
@@ -297,7 +301,12 @@ def _translated_page(
     result.untranslated += sum(1 for _i, t in pending if normalize(t) not in translations)
     if not any(normalize(t) in translations for t in texts):
         return image  # nada para desenhar: nem precisa do detector
-    image, drawn = render_page(image, pipeline.page_layout(image, boxes, config), texts, translations, font_of(config))
+    if page.layouts and all(page.layouts):
+        # Balão e área guardados na importação: não precisa do detector
+        regions = [Region(box, area, bubble) for box, (area, bubble) in zip(boxes, page.layouts)]
+    else:
+        regions = pipeline.page_layout(image, boxes, config)
+    image, drawn = render_page(image, regions, texts, translations, font_of(config), config.target_lang)
     result.drawn += drawn
     return image
 

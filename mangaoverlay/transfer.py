@@ -93,9 +93,13 @@ def _chapters(conn, work_id: int) -> list[dict]:
             "SELECT id, numero, arquivo, estado, erro FROM paginas WHERE capitulo_id = ? ORDER BY numero", (chapter_id,)
         ).fetchall():
             regions = conn.execute(
-                "SELECT x0, y0, x1, y1, texto_original FROM regioes WHERE pagina_id = ? ORDER BY ordem", (page_id,)
+                "SELECT x0, y0, x1, y1, texto_original, forma FROM regioes WHERE pagina_id = ? ORDER BY ordem", (page_id,)
             ).fetchall()
-            pages.append({"numero": number, "arquivo": file, "estado": state, "erro": error, "regioes": [list(r) for r in regions]})
+            page = {"numero": number, "arquivo": file, "estado": state, "erro": error, "regioes": [list(r[:5]) for r in regions]}
+            if any(r[5] for r in regions):
+                # Chave à parte (e não um 6º item em "regioes"): versões anteriores do app ignoram e importam o resto
+                page["formas"] = [r[5] for r in regions]
+            pages.append(page)
         chapter_name, order, origin, chapter_created, names_done, summarized = chapter
         chapters.append({
             "nome": chapter_name, "ordem": order, "origem": origin, "criado_em": chapter_created,
@@ -264,9 +268,13 @@ def _import_work(conn, work: dict, result: ImportResult) -> None:
                 "INSERT INTO paginas (capitulo_id, numero, arquivo, estado, erro) VALUES (?, ?, ?, ?, ?)",
                 (chapter_id, page["numero"], page["arquivo"], page.get("estado", "lida"), page.get("erro")),
             ).lastrowid
+            regions = page.get("regioes", [])
+            shapes = page.get("formas") or []
+            if len(shapes) != len(regions):  # arquivo editado à mão: sem as formas, a geração acha os balões de novo
+                shapes = [None] * len(regions)
             conn.executemany(
-                "INSERT INTO regioes (pagina_id, ordem, x0, y0, x1, y1, texto_original) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(page_id, order, *region) for order, region in enumerate(page.get("regioes", []), start=1)],  # como save_page_texts
+                "INSERT INTO regioes (pagina_id, ordem, x0, y0, x1, y1, texto_original, forma) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(page_id, order, *region, shape) for order, (region, shape) in enumerate(zip(regions, shapes), start=1)],
             )
             result.pages += 1
 

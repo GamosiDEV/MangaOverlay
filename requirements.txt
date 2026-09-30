@@ -14,4 +14,5 @@ anthropic>=1.8
 keyring>=24.0
 platformdirs>=4.0
 pynput>=1.7.7
+pyphen>=0.14
 jeepney>=0.8; sys_platform == "linux"

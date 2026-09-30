@@ -46,6 +46,8 @@ class OverlayItem:
     background: tuple[int, int, int]
     bubble: Box | None  # a cobertura não passa do interior do balão (não apaga o contorno)
     missing: bool = False  # modo "só traduções salvas": fala sem tradução no banco (original fica visível, marcado)
+    shape: str = "ellipse"  # forma do balão: "ellipse" ou "rect" (caixa de narração); ver bubble_shape
+    language: str = ""  # idioma da tradução (hifenização)
 
 
 def _dhash(image: Image.Image) -> int:
@@ -68,6 +70,49 @@ def _background(image: np.ndarray, box: Box) -> tuple[int, int, int]:
         return 255, 255, 255
     border = np.concatenate([patch[0], patch[-1], patch[:, 0], patch[:, -1]])
     return tuple(int(v) for v in np.median(border, axis=0))
+
+
+def box_paper(frame: np.ndarray, bubble: Box) -> tuple[int, int, int]:
+    """Cor do papel de uma caixa retangular: faixa fina logo por dentro do contorno (ali quase não há texto). A caixa
+    inteira é coberta, então a cor medida em volta do texto (que pode ser denso, como numa onomatopeia) não serve."""
+    x0, y0, x1, y1 = bubble
+    inset = max(4, round(min(x1 - x0, y1 - y0) * 0.07))
+    outer = frame[y0 + inset : y1 - inset, x0 + inset : x1 - inset]
+    ring = 3
+    if outer.shape[0] <= 2 * ring or outer.shape[1] <= 2 * ring:
+        return _background(frame, bubble)
+    border = np.concatenate([
+        outer[:ring].reshape(-1, 3), outer[-ring:].reshape(-1, 3), outer[:, :ring].reshape(-1, 3), outer[:, -ring:].reshape(-1, 3)
+    ])
+    return tuple(int(v) for v in np.median(border, axis=0))
+
+
+def bubble_shape(frame: np.ndarray, bubble: Box, background: tuple[int, int, int]) -> str:
+    """"rect" para caixas de narração e placas: contorno reto que vai até perto dos cantos da caixa, com papel logo por
+    dentro. "ellipse" para balões: perto dos cantos da caixa de um balão redondo não passa contorno nenhum."""
+    height, width = frame.shape[:2]
+    x0, y0, x1, y1 = max(0, bubble[0]), max(0, bubble[1]), min(width, bubble[2]), min(height, bubble[3])
+    w, h = x1 - x0, y1 - y0
+    if w < 24 or h < 24:
+        return "ellipse"
+    gray = frame[y0:y1, x0:x1].astype(np.float32).mean(axis=2)
+    paper = float(np.mean(background))
+    dark = gray < paper - 80
+    band_x, band_y = max(3, round(w * 0.07)), max(3, round(h * 0.07))
+    cols = slice(round(w * 0.03), max(round(w * 0.03) + 1, round(w * 0.12)))
+    rows = slice(round(h * 0.03), max(round(h * 0.03) + 1, round(h * 0.12)))
+    corners = 0
+    for ys in (slice(None), slice(None, None, -1)):
+        for xs in (slice(None), slice(None, None, -1)):
+            d, g = dark[ys, xs], gray[ys, xs]
+            across = d[:band_y, cols].any(axis=0).mean()  # a linha de cima cruza as colunas perto do canto
+            down = d[rows, :band_x].any(axis=1).mean()  # e a do lado, as linhas perto do canto
+            # Logo por dentro do canto: quase só papel. Letras são traços finos (a caixa pode estar cheia de texto até o
+            # canto); desenho e retícula em volta de um balão redondo cobrem bem mais
+            inside = g[round(band_y * 1.2) : round(band_y * 2.5), round(band_x * 1.2) : round(band_x * 2.5)]
+            if across >= 0.8 and down >= 0.8 and inside.size and (inside > paper - 40).mean() >= 0.6:
+                corners += 1
+    return "rect" if corners >= 3 else "ellipse"
 
 
 @dataclass
@@ -406,7 +451,9 @@ class Pipeline:
                 continue
             if translation.casefold() == text.casefold():
                 continue  # "não precisa traduzir" (reticências, onomatopeias)
-            extra.append(OverlayItem(fill, _expand(box, image.size), translation, text, _background(frame, fill), None))
+            extra.append(
+                OverlayItem(fill, _expand(box, image.size), translation, text, _background(frame, fill), None, language=config.target_lang)
+            )
         return extra
 
     def _with_saved_extras(self, image: Image.Image, detection, config: Config) -> tuple[list[Region], frozenset[int]]:
@@ -465,14 +512,18 @@ class Pipeline:
             if result is None or not result.translation or result.translation.casefold() == result.original.casefold():
                 continue
             fill = _expand(region.text_box, image.size)
+            background = _background(frame, fill)
+            shape = bubble_shape(frame, region.bubble, background) if region.bubble else "ellipse"
             items.append(
                 OverlayItem(
                     fill=fill,
                     area=region.area,
                     text=result.translation,
                     original=result.original,
-                    background=_background(frame, fill),
+                    background=box_paper(frame, region.bubble) if shape == "rect" else background,
                     bubble=region.bubble,
+                    shape=shape,
+                    language=config.target_lang,
                 )
             )
         return items
@@ -575,8 +626,9 @@ class Pipeline:
                     accepted[i] = text
         return [(i, accepted[i]) for i in indices if i in accepted]
 
-    def read_page(self, image: Image.Image, config: Config) -> list[tuple[Box, str]]:
-        """Detecção + OCR de uma página importada: (caixa do texto, texto lido) na ordem de leitura.
+    def read_page(self, image: Image.Image, config: Config) -> list[tuple[Box, str, tuple[Box, Box | None]]]:
+        """Detecção + OCR de uma página importada: (caixa do texto, texto lido, (área de escrita, balão)) na ordem de
+        leitura. A área e o balão ficam no banco para gerar o capítulo traduzido sem rodar o detector de novo.
 
         Roda em segundo plano e cede a GPU a cada página se o usuário pedir uma tradução na tela.
         """
@@ -600,7 +652,7 @@ class Pipeline:
                     if confidence >= 0.4 and looks_like(text, config.source_lang) and sum(ch.isalpha() for ch in text) >= 2:
                         regions.append(Region(text_box=box, area=box, bubble=None, score=0.5))
                         readable.append((len(regions) - 1, text))
-        boxes = [(regions[i].text_box, text) for i, text in readable]
+        boxes = [(regions[i].text_box, text, (regions[i].area, regions[i].bubble)) for i, text in readable]
         return sorted(boxes, key=lambda item: _reading_order(item[0], image.height, config.source_lang))
 
     def page_layout(self, image: Image.Image, boxes: list[Box], config: Config) -> list[Region]:
