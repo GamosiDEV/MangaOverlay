@@ -146,7 +146,7 @@ O `constraints.txt` fixa as versões testadas das bibliotecas; sem ele, o pip in
 ## Primeiros passos
 
 1. **Abra o app.** Ele fica na bandeja; na primeira vez, carrega os modelos (alguns segundos).
-2. **Escolha o idioma de origem** no menu do ícone da bandeja (japonês, coreano, chinês ou inglês). O destino padrão é português.
+2. **Escolha o idioma de origem** no menu do ícone da bandeja (japonês, coreano, chinês ou inglês). Na dúvida, abra uma página e use **Origem → Detectar pela tela…**. O destino padrão é português.
 3. **Abra uma página de mangá** em qualquer leitor e aperte **Ctrl+Alt+M**. Um pontinho azul no canto indica que está traduzindo; em seguida, a tradução aparece por cima dos balões.
 4. **Ctrl+Alt+N** esconde a tradução. Para a próxima página, aperte Ctrl+Alt+M de novo, ou ligue o [tempo real](#tempo-real) para o app traduzir sozinho a cada página.
 
@@ -174,6 +174,14 @@ No menu da bandeja, **Obra** escolhe o mangá que você está lendo (ou cria um 
 "Esquecer as traduções desta obra…" apaga as traduções salvas da obra atual (pede confirmação).
 
 A busca no banco é primeiro pelo texto exato e, se não achar, por semelhança (80% ou mais, em falas com 4 caracteres ou mais), porque o OCR às vezes lê um risco do desenho como um caractere a mais.
+
+### Idioma de origem
+
+O OCR precisa saber o idioma antes de ler: com a origem errada, o texto sai com erros e a tradução, errada. Três ajudas, todas grátis e offline (o idioma é reconhecido pela escrita: kana é japonês, hangul é coreano, só ideogramas é chinês, letras latinas é inglês):
+
+- **Origem → Detectar pela tela…** lê as falas da página aberta e sugere o idioma. Chinês simplificado ou tradicional é decidido comparando os dois leitores de chinês.
+- **Ao importar capítulos**, as primeiras páginas são conferidas; se não baterem com o idioma da obra, o app pergunta se deve trocar antes de importar.
+- **Durante a leitura**, se as falas parecerem de outro idioma (por exemplo, chinês com a origem em japonês), um aviso sugere a troca, uma vez por obra; clique no aviso ou use o item sugerido no menu da bandeja.
 
 ### Tempo real
 

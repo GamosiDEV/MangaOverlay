@@ -26,7 +26,7 @@ from .config import CONFIG_DIR, ENGINES, Config
 from .batch import BatchRunner, batch_key
 from .db import Database
 from .importer import Importer
-from .sources import discover
+from .sources import discover, load_page
 from .hotkeys import HotkeyManager
 from .languages import AUTO, SOURCES, TARGETS, source_name, target_name
 from .pipeline import Pipeline
@@ -123,6 +123,10 @@ class MangaOverlayApp(QObject):
         self._request = 0
         self._cancel: threading.Event | None = None
         self._auto = False  # o pedido atual veio do modo em tempo real (sem avisos de "nada encontrado")
+        self._last_shots: dict = {}  # a última tela capturada (para conferir o idioma quando a leitura parece errada)
+        self._language_checked: set[tuple] = set()  # (obra, origem) já conferidas nesta sessão: avisa uma vez só
+        self._suggested_source: str | None = None  # origem sugerida pelo aviso (item do menu e clique no aviso)
+        self._on_message_clicked = None  # ação do clique na notificação atual
         self._realtime: realtime.RealtimeWatcher | None = None
         self._settings_open = False
 
@@ -200,6 +204,10 @@ class MangaOverlayApp(QObject):
         transfer_menu.addAction("Importar de um arquivo…", self._import_data)
         self._source_menu = menu.addMenu("")
         self._source_group = self._choice_actions(self._source_menu, [(source_name(c), c) for c in [*SOURCES, AUTO]], "source_lang")
+        self._source_menu.addSeparator()
+        self._source_menu.addAction("Detectar pela tela…", self.detect_language_screen)
+        self._suggest_action = menu.addAction("", self._apply_suggested_source)
+        self._suggest_action.setVisible(False)
         self._target_menu = menu.addMenu("")
         self._target_group = self._choice_actions(self._target_menu, [(target_name(c), c) for c in TARGETS], "target_lang")
         self._engine_menu = menu.addMenu("")
@@ -223,6 +231,7 @@ class MangaOverlayApp(QObject):
         self._menu = menu
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
+        self.tray.messageClicked.connect(lambda: self._on_message_clicked and self._on_message_clicked())
         self._refresh_menu()
         self.tray.show()
 
@@ -254,6 +263,9 @@ class MangaOverlayApp(QObject):
         self._memory_action.setEnabled(work is not None)
         self._names_action.setEnabled(work is not None)
         self._source_menu.setTitle(f"Origem: {source_name(c.source_lang)}")
+        if self._suggested_source == c.source_lang:
+            self._suggested_source = None
+            self._suggest_action.setVisible(False)
         self._target_menu.setTitle(f"Destino: {target_name(c.target_lang)}")
         self._engine_menu.setTitle(f"Motor: {ENGINES[c.engine]}")
         for group, value in (
@@ -346,6 +358,37 @@ class MangaOverlayApp(QObject):
         if not chapters:
             QMessageBox.warning(None, APP_DISPLAY_NAME, "Nenhum capítulo encontrado.\n\n" + "\n".join(warnings[:10]))
             return
+        # Confere o idioma nas primeiras páginas antes de importar: a leitura usa o idioma da obra, e ler no idioma
+        # errado estraga a importação e as traduções feitas a partir dela
+        sample = []
+        for chapter in chapters[:2]:
+            for file in chapter.files[:2]:
+                try:
+                    sample.append(load_page(chapter.origin, file))
+                except Exception:  # página corrompida: a importação avisa depois
+                    pass
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        def confirm(guess) -> None:
+            QApplication.restoreOverrideCursor()
+            self._confirm_import(work, chapters, warnings, guess)
+
+        self._run(self.pipeline.detect_language, sample, replace(self.config), "file", on_done=confirm, on_failed=lambda _e: confirm(None))
+
+    def _confirm_import(self, work, chapters, warnings, guess) -> None:
+        if guess is not None and guess.language is not None and guess.language != work.source_lang:
+            answer = QMessageBox.question(
+                None,
+                APP_DISPLAY_NAME,
+                f"As páginas parecem {source_name(guess.language)} ({guess.votes} de {guess.total} falas), mas a obra "
+                f"“{work.name}” está como {source_name(work.source_lang)}.\n\nTrocar a origem da obra para "
+                f"{source_name(guess.language)} antes de importar? (A leitura dos balões usa o idioma da obra.)",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.db.set_work_language(work.id, guess.language)
+                if work.id == self.config.current_work:
+                    self._update_config(source_lang=guess.language)
+                work = self.db.work(work.id)
         pages = sum(len(c.files) for c in chapters)
         listing = "\n".join(f"• {c.name} ({len(c.files)} págs)" for c in chapters[:15])
         if len(chapters) > 15:
@@ -636,7 +679,8 @@ class MangaOverlayApp(QObject):
             # Clique no ícone: traduz; durante uma tradução, cancela
             self.cancel_translation() if self._busy else self.translate_screen()
 
-    def _notify(self, message: str, timeout: int = 8000, warning: bool = False) -> None:
+    def _notify(self, message: str, timeout: int = 8000, warning: bool = False, on_click=None) -> None:
+        self._on_message_clicked = on_click  # só a notificação atual responde ao clique
         icon = QSystemTrayIcon.MessageIcon.Warning if warning else QSystemTrayIcon.MessageIcon.Information
         self.tray.showMessage(APP_DISPLAY_NAME, message, icon, timeout)
 
@@ -791,11 +835,15 @@ class MangaOverlayApp(QObject):
             self.tray.setToolTip(APP_DISPLAY_NAME)
 
     def _grab(self, translate: bool, colorize: bool) -> None:
+        self._capture(lambda shots: self._process(shots, translate, colorize))
+
+    def _capture(self, on_shots) -> None:
+        """Captura cada monitor e chama `on_shots` com {monitor: imagem} (se o pedido não tiver sido cancelado)."""
         if is_wayland():
             # O portal bloqueia (e pode abrir o diálogo de permissão): roda em segundo plano.
             self._run(
                 screenshot.grab_wayland,
-                on_done=self._current(lambda result: self._process(screenshot.split_screens(*result), translate, colorize)),
+                on_done=self._current(lambda result: on_shots(screenshot.split_screens(*result))),
                 on_failed=self._current(self._on_failed),
             )
             return
@@ -804,7 +852,7 @@ class MangaOverlayApp(QObject):
         except Exception as exc:
             self._on_failed(exc)
             return
-        self._process(shots, translate, colorize)
+        on_shots(shots)
 
     def _process(self, shots: dict, translate: bool, colorize: bool) -> None:
         if self._realtime is not None:
@@ -819,6 +867,7 @@ class MangaOverlayApp(QObject):
             busy.show_busy()
         config = replace(self.config)
         cancel = self._cancel
+        self._last_shots = shots
 
         def work():
             return {
@@ -853,6 +902,8 @@ class MangaOverlayApp(QObject):
                 texts += len(result.items)
                 pages += result.color_image is not None
         _log(f"Tela processada: {texts} texto(s), {pages} página(s) colorida(s)")
+        if translate and any(result.suspect_language for result, _size in results.values()):
+            self._check_language()
         if self._realtime is not None:
             self._realtime.detector.displayed(_translation_masks(results))
         if self._auto:
@@ -868,6 +919,94 @@ class MangaOverlayApp(QObject):
             self._notify("Nenhuma página de mangá encontrada na tela para colorir (a página precisa ter balões).", 5000)
         elif translate and not colorize and texts == 0:
             self._notify("Nenhum texto para traduzir encontrado na tela.", 4000)
+
+    # --- idioma de origem -------------------------------------------------------
+
+    def detect_language_screen(self) -> None:
+        """Origem → Detectar pela tela: lê as falas da página aberta e sugere o idioma."""
+        if self._busy:
+            return
+        self._busy = True
+        self._auto = False
+        self._request += 1
+        self._cancel = threading.Event()
+        if self._realtime is not None:
+            self._realtime.detector.busy()
+        self._set_busy_tooltip(True)
+        self.hide_translation()
+        request = self._request
+        QTimer.singleShot(250, lambda: request == self._request and self._capture(self._detect_on_shots))
+
+    def _detect_on_shots(self, shots: dict) -> None:
+        self._run(
+            self.pipeline.detect_language,
+            list(shots.values()),
+            replace(self.config),
+            on_done=self._current(self._on_language_detected),
+            on_failed=self._current(self._on_failed),
+        )
+
+    def _on_language_detected(self, guess) -> None:
+        self._busy = False
+        self._set_busy_tooltip(False)
+        self._rearm_realtime()
+        if guess.language is None:
+            QMessageBox.information(
+                None,
+                APP_DISPLAY_NAME,
+                "Não deu para saber o idioma: poucas falas com escrita clara na tela "
+                f"({guess.total}). Abra uma página com mais falas e tente de novo.",
+            )
+            return
+        found = f"As falas parecem {source_name(guess.language)} ({guess.votes} de {guess.total})."
+        if guess.ambiguous_chinese:
+            found += "\nNão deu para saber se é chinês simplificado ou tradicional; se for tradicional, escolha no menu Origem."
+        if guess.language == self.config.source_lang:
+            QMessageBox.information(None, APP_DISPLAY_NAME, found + "\n\nEsta já é a origem escolhida.")
+            return
+        work = self.db.work(self.config.current_work)
+        target = f" da obra “{work.name}”" if work else ""
+        answer = QMessageBox.question(
+            None, APP_DISPLAY_NAME, f"{found}\n\nUsar {source_name(guess.language)} como origem{target}?"
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._update_config(source_lang=guess.language)
+
+    def _check_language(self) -> None:
+        """A leitura pareceu errada (ex.: chinês com a origem em japonês): confere o idioma da tela, uma vez por obra e
+        origem nesta sessão, e sugere trocar."""
+        key = (self.config.current_work, self.config.source_lang)
+        if key in self._language_checked or not self._last_shots or self.config.source_lang == AUTO:
+            return
+        self._language_checked.add(key)
+        self._run(
+            self.pipeline.detect_language,
+            list(self._last_shots.values()),
+            replace(self.config),
+            on_done=lambda guess: self._suggest_source(guess, key),
+            on_failed=lambda _exc: None,
+        )
+
+    def _suggest_source(self, guess, key: tuple) -> None:
+        if guess.language is None or guess.language == key[1] or (self.config.current_work, self.config.source_lang) != key:
+            return
+        _log(f"Origem suspeita: as falas parecem {guess.language}, a origem é {key[1]}")
+        self._suggested_source = guess.language
+        self._suggest_action.setText(f"Usar {source_name(guess.language)} como origem (sugerido)")
+        self._suggest_action.setVisible(True)
+        self._notify(
+            f"As falas parecem {source_name(guess.language)}, mas a origem está em {source_name(key[1])}. "
+            "Clique aqui para trocar (ou use o item sugerido no menu da bandeja).",
+            15000,
+            warning=True,
+            on_click=self._apply_suggested_source,
+        )
+
+    def _apply_suggested_source(self) -> None:
+        if self._suggested_source is not None:
+            self._update_config(source_lang=self._suggested_source)
+        self._suggested_source = None
+        self._suggest_action.setVisible(False)
 
     def _on_failed(self, exc: Exception) -> None:
         self._busy = False

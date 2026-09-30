@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
-from . import credentials, llm_anthropic, llm_openai, translators
+from . import credentials, langdetect, llm_anthropic, llm_openai, translators
 from .colorize import Colorizer, find_page
 from .config import ENGINES, VISION_ENGINES, Config
 from .db import FUZZY_MIN_RATIO, FUZZY_RATIO_MIN_LENGTH, Database, TranslationKey, _one_edit_apart, match_key, normalize
@@ -25,6 +25,8 @@ from .translators import Line, Result
 ALL_ENGINES = tuple(ENGINES)
 # Confiança mínima do detector para tentar ler em japonês uma caixa que o leitor do idioma da obra não leu
 _SECOND_LANGUAGE_MIN_SCORE = 0.45
+# Falas (as maiores) lidas por página para detectar o idioma
+_LANGUAGE_SAMPLE = 12
 
 
 class PipelineError(Exception):
@@ -73,6 +75,8 @@ class ScreenResult:
     items: list[OverlayItem]  # traduções
     color_box: Box | None  # onde está a página na tela (quando colorida)
     color_image: Image.Image | None  # a página colorida, do tamanho de color_box
+    # O OCR do idioma de origem leu mal as falas (ex.: chinês lido como japonês): vale conferir o idioma
+    suspect_language: bool = False
 
 
 def _same_line(a: str, b: str) -> bool:
@@ -106,6 +110,17 @@ def _fit_transform(pairs: list[tuple[tuple[float, float], Box]], size: tuple[int
     if scale <= 0.05 or agree < 2 or agree < 0.6 * len(pairs):
         return None
     return scale, dx, dy
+
+
+def _looks_misread(source: str, detected: int, texts: list[str]) -> bool:
+    """Sinais de que o idioma de origem está errado: o leitor leu poucas das falas detectadas, ou, em japonês, as falas
+    lidas quase não têm kana (chinês lido como japonês: o leitor de mangá lê os ideogramas, mas não há kana)."""
+    if detected >= 3 and len(texts) <= detected // 3:
+        return True
+    if source == "ja" and len(texts) >= 2:
+        without_kana = sum(1 for t in texts if langdetect.script_of(t) == "zh")
+        return without_kana / len(texts) >= 0.7
+    return False
 
 
 def _single_transform(fill: Box, file_box: Box, length: int) -> tuple[float, float, float] | None:
@@ -183,6 +198,7 @@ class Pipeline:
         self._context: deque[str] = deque(maxlen=30)
         # Pedido da tela em andamento: quando ligado, o processamento para no próximo ponto de checagem
         self._cancel: threading.Event | None = None
+        self._suspect_language = False
 
     def clear_cache(self, work_id: int | None = None, forget_saved: bool = False) -> int:
         """Esvazia o cache em memória; com forget_saved, apaga também as traduções salvas da obra."""
@@ -235,10 +251,31 @@ class Pipeline:
         tradutor já em andamento não é interrompida; o que ela devolver é salvo no banco antes da checagem."""
         with self._interactive():
             self._cancel = cancel
+            self._suspect_language = False
             try:
-                return self._process(image, config, status, translate, colorize)
+                result = self._process(image, config, status, translate, colorize)
+                result.suspect_language = self._suspect_language
+                return result
             finally:
                 self._cancel = None
+
+    def detect_language(self, images: list[Image.Image], config: Config, profile: str = "screen") -> "langdetect.Guess":
+        """Idioma das falas nas imagens (a tela, ou as primeiras páginas de um capítulo com profile="file")."""
+        with self._interactive():
+            self._prepare(config, lambda _msg: None)
+            scripts: list[str | None] = []
+            chinese: list[tuple[float, float]] = []
+            for image in images:
+                if profile == "file":
+                    regions = self._detector.detect(image, profile="file").regions
+                else:
+                    regions = self._detector.detect(image, include_free_text=True).regions
+                regions = sorted(regions, key=lambda r: (r.text_box[2] - r.text_box[0]) * (r.text_box[3] - r.text_box[1]), reverse=True)
+                crops = [image.crop(r.text_box) for r in regions[:_LANGUAGE_SAMPLE]]
+                page_scripts, page_chinese = langdetect.read_scripts(self._ocr, crops)
+                scripts += page_scripts
+                chinese += page_chinese
+            return langdetect.decide(scripts, chinese)
 
     def _check(self) -> None:
         if self._cancel is not None and self._cancel.is_set():
@@ -476,6 +513,7 @@ class Pipeline:
 
         status("Lendo os textos…")
         readable = self._read(crops, indices, source)
+        self._suspect_language = self._suspect_language or _looks_misread(source, len(indices), [t for _i, t in readable])
         if not readable:
             return {}
         self._check()
