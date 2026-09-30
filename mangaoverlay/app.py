@@ -44,6 +44,20 @@ from .ui.settings import SettingsDialog
 from .ui.transferdialog import ExportDialog, preview_text
 
 
+def _translation_masks(results: dict) -> "realtime.Masks":
+    """Onde a tradução foi desenhada, na escala das miniaturas do tempo real (com uma folga de 2 px): essas áreas
+    ficam fora da comparação, para a própria tradução não contar como mudança de página."""
+    masks = {}
+    for name, (result, size) in results.items():
+        scale = realtime.THUMB_WIDTH / max(1, size[0])
+        boxes = []
+        for item in result.items:
+            for x0, y0, x1, y1 in (item.fill, item.area):
+                boxes.append((int(x0 * scale) - 2, int(y0 * scale) - 2, int(x1 * scale) + 3, int(y1 * scale) + 3))
+        masks[name] = boxes
+    return masks
+
+
 def _log(message: str) -> None:
     """Uma linha no stderr (no Windows, sem console, vai para o arquivo de log do app)."""
     print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}", file=sys.stderr, flush=True)
@@ -134,7 +148,8 @@ class MangaOverlayApp(QObject):
         self.batch_runner.finished.connect(self._on_batch_finished)
 
         self._build_tray()
-        self.status.connect(lambda message: self._notify(message, 5000))
+        # No tempo real, os avisos de andamento só iriam poluir a tela (e a notificação mudaria a tela no meio da tradução)
+        self.status.connect(lambda message: None if self._auto else self._notify(message, 5000))
 
         self.hotkeys = HotkeyManager(self)
         self.hotkeys.triggered.connect(self._on_hotkey)
@@ -792,9 +807,15 @@ class MangaOverlayApp(QObject):
         self._process(shots, translate, colorize)
 
     def _process(self, shots: dict, translate: bool, colorize: bool) -> None:
+        if self._realtime is not None:
+            # A captura do portal (GNOME) dá um flash na tela: a comparação começa depois dele
+            self._realtime.detector.capture_done(realtime.PORTAL_FLASH_FRAMES if is_wayland() else 0)
         cursor_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         busy = self._overlay(cursor_screen.name())
-        if busy is not None:
+        # No tempo real, sem o pontinho de "traduzindo": nada do app aparece na tela até o resultado, então qualquer
+        # mudança nas capturas durante a tradução é da página (onde o Windows não exclui a sobreposição das capturas,
+        # ela mesma apareceria como mudança)
+        if busy is not None and not self._auto:
             busy.show_busy()
         config = replace(self.config)
         cancel = self._cancel
@@ -817,8 +838,11 @@ class MangaOverlayApp(QObject):
         self.hide_translation()
         if self._realtime is not None and self._realtime.detector.freeze():
             # A tela mudou enquanto traduzia (a página nova demorou a abrir): o resultado é da tela antiga
-            _log("Tempo real: a tela mudou durante a tradução; resultado descartado")
-            self._realtime.detector.changed_again()
+            if self._realtime.detector.changed_again():
+                _log("Tempo real: a tela mudou durante a tradução; resultado descartado, esperando ela parar")
+            else:
+                _log("Tempo real: a tela não parou de mudar; esperando a próxima mudança")
+                self._rearm_realtime()
             return
         font = base_font(self.config.font_family)
         texts = pages = 0
@@ -829,7 +853,8 @@ class MangaOverlayApp(QObject):
                 texts += len(result.items)
                 pages += result.color_image is not None
         _log(f"Tela processada: {texts} texto(s), {pages} página(s) colorida(s)")
-        self._rearm_realtime()
+        if self._realtime is not None:
+            self._realtime.detector.displayed(_translation_masks(results))
         if self._auto:
             return  # no tempo real, "nada encontrado" a cada tela sem mangá seria só barulho
         if translate and self.config.saved_only:
@@ -873,10 +898,18 @@ class MangaOverlayApp(QObject):
             if not screencast.available():
                 self._realtime_off(screencast.MISSING_GSTREAMER)
                 return
-            source = screencast.ScreenCastSource(CONFIG_DIR / "screencast-token")
-            watcher = realtime.RealtimeWatcher(source.latest, self, stop_source=source.stop)
+            screens = [(s.name(), s.geometry().getRect()) for s in QGuiApplication.screens()]
+            source = screencast.ScreenCastSource(CONFIG_DIR / "screencast-token", screens)
+            grab, stop = source.latest, source.stop
         else:
-            watcher = realtime.RealtimeWatcher(realtime.grab_qt_thumbnails, self)
+            grab, stop = realtime.grab_qt_thumbnails, None
+        areas = realtime.available_areas()
+
+        def thumbnails():
+            frame = grab()
+            return realtime.only_available(frame, areas) if frame else frame
+
+        watcher = realtime.RealtimeWatcher(thumbnails, self, stop_source=stop)
         watcher.changed.connect(self._on_page_changed)
         watcher.settled.connect(self._on_page_settled)
         watcher.failed.connect(self._realtime_off)
@@ -896,10 +929,9 @@ class MangaOverlayApp(QObject):
         self._start(translate=True, colorize=self.config.colorize, auto=True)
 
     def _rearm_realtime(self) -> None:
-        """Depois de mostrar (ou esconder) a tradução, a tela atual vira a referência. Espera a sobreposição aparecer
-        na captura, para ela mesma não contar como mudança de página."""
-        if self._realtime is not None:
-            QTimer.singleShot(1200, lambda: self._realtime is not None and not self._busy and self._realtime.detector.rearm())
+        """Depois de esconder a tradução (ou de uma falha), a tela atual vira a referência (o detector espera ~1 s)."""
+        if self._realtime is not None and not self._busy:
+            self._realtime.detector.rearm()
 
     def _realtime_off(self, message: str) -> None:
         if self._realtime is not None:

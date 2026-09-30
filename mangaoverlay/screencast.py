@@ -43,8 +43,11 @@ def available() -> bool:
 class ScreenCastSource:
     """Fonte de miniaturas para o RealtimeWatcher. `latest()` levanta RuntimeError se a transmissão falhou ou acabou."""
 
-    def __init__(self, token_file: Path):
+    def __init__(self, token_file: Path, screens: list[tuple[str, tuple[int, int, int, int]]] | None = None):
+        """`screens`: (nome, geometria x, y, largura, altura) dos monitores no Qt. Cada transmissão recebe o nome do
+        monitor mais próximo, para as miniaturas casarem com as capturas usadas na tradução."""
         self._token_file = token_file
+        self._screens = screens or []
         self._lock = threading.Lock()
         self._frames: Thumbs = {}
         self._error: str | None = None
@@ -108,6 +111,7 @@ class ScreenCastSource:
 
         for node, props in started["streams"][1]:
             width, height = props.get("size", ("(ii)", (16, 9)))[1]
+            position = props.get("position", ("(ii)", (0, 0)))[1]
             thumb_height = max(1, round(THUMB_WIDTH * height / width))
             pipeline = [
                 "gst-launch-1.0", "-q", "pipewiresrc", f"fd={raw}", f"path={node}", "do-timestamp=true", "keepalive-time=500",
@@ -119,10 +123,17 @@ class ScreenCastSource:
             )
             self._procs.append(proc)
             threading.Thread(
-                target=self._read_frames, args=(proc, f"stream-{node}", thumb_height), name=f"screencast-{node}", daemon=True
+                target=self._read_frames, args=(proc, self._screen_name(position, node), thumb_height), name=f"screencast-{node}",
+                daemon=True
             ).start()
         # O aviso de "pai morreu" (_die_with_parent) vale para a thread que criou os processos: ela fica viva até stop()
         self._done.wait()
+
+    def _screen_name(self, position: tuple[int, int], node: int) -> str:
+        if not self._screens:
+            return f"stream-{node}"
+        x, y = position
+        return min(self._screens, key=lambda s: abs(s[1][0] - x) + abs(s[1][1] - y))[0]
 
     def _read_frames(self, proc: subprocess.Popen, name: str, height: int) -> None:
         size = THUMB_WIDTH * height  # GRAY8 com largura múltipla de 4: sem sobra no fim das linhas

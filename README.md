@@ -185,7 +185,7 @@ Liga e desliga em **Configurações** ou no menu da bandeja ("Tempo real"). O ap
 Durante a rolagem ele espera terminar, sem traduzir no meio. Telas sem mangá não geram avisos. **Ctrl+Alt+N** esconde a tradução até a próxima mudança de página.
 
 - **GNOME/Wayland:** a observação usa a transmissão de tela do sistema (PipeWire). Na primeira vez, o GNOME pergunta qual tela compartilhar e depois lembra da resposta. Enquanto o tempo real estiver ligado, aparece o ícone de compartilhamento de tela na barra superior; parar o compartilhamento por ali desliga o modo. O instalador instala o GStreamer necessário (`gstreamer1.0-tools` e `gstreamer1.0-pipewire`).
-- **Windows:** a tradução fica invisível para capturas de tela, então o app enxerga a página por baixo dela sem piscar.
+- **Windows:** o app pede ao Windows para deixar a tradução fora das capturas de tela, para enxergar a página por baixo dela; em placas de vídeo sem suporte (como as de máquinas virtuais), ele compara a tela com a tradução já desenhada, e funciona do mesmo jeito.
 
 Com um motor pago, cada página nova é uma tradução, como se você apertasse o atalho; voltar a uma página já traduzida continua sem custo.
 
