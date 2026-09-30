@@ -171,6 +171,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          # O checkout traz a tag sem a anotação (as notas saíam iguais à mensagem do commit): busca a tag de verdade
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           notes=$(git tag -l --format='%(contents)' "$tag")
           gh release create "$tag" "MangaOverlay-${tag}-windows.zip" "MangaOverlay-${tag}-linux.tar.gz" \
             --title "MangaOverlay ${tag#v}" --notes "$notes"
