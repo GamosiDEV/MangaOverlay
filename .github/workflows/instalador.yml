@@ -43,6 +43,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # O QtGui precisa da libEGL, que a máquina Ubuntu do GitHub não tem
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1
       # Só o que os testes usam (sem PyTorch e modelos): detecção da página, tempo real, exportar e importar
       - run: python -m pip install numpy pillow platformdirs PySide6 pytest -c constraints.txt
       - run: python -m pytest tests -q
