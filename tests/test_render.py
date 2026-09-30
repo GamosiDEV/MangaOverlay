@@ -84,3 +84,12 @@ def test_papel_da_caixa_retangular_ignora_texto_denso():
     frame = frame.copy()
     frame[140:260, 140:260] = 60  # onomatopeia grossa no meio da caixa
     assert box_paper(frame, (97, 97, 303, 303)) == (250, 245, 235)
+
+
+def test_tamanho_nunca_quebra_uma_palavra_a_forca():
+    from PySide6.QtCore import QRectF
+
+    font = render.base_font(render.COMIC_FONT)
+    text = " ".join(render._words("- Não."))
+    fitted = render._fit_font(font, text, QRectF(0, 0, 60, 200))
+    assert QFontMetricsF(fitted).horizontalAdvance(text) <= 60.5
