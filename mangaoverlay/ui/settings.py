@@ -109,12 +109,22 @@ class SettingsDialog(QDialog):
 
         self.colorize = QCheckBox("Colorir a página junto com a tradução")
         self.colorize.setChecked(config.colorize)
+        self.realtime = QCheckBox("Tempo real: traduzir sozinho quando a página mudar (troca de página, rolagem)")
+        self.realtime.setChecked(config.realtime)
+        realtime_note = (
+            "No GNOME, na primeira vez o sistema pergunta qual tela compartilhar; enquanto estiver ligado, aparece o "
+            "ícone de compartilhamento de tela na barra superior."
+            if is_wayland()
+            else "A tela é observada em miniatura duas vezes por segundo; a tradução só roda quando a página para de mudar."
+        )
+        self.realtime.setToolTip(realtime_note + " Com motores pagos, cada página nova é uma tradução, como no atalho.")
         self.hotkey_translate = _hotkey_edit(config.hotkey_translate)
         self.hotkey_colorize = _hotkey_edit(config.hotkey_colorize)
         self.hotkey_hide = _hotkey_edit(config.hotkey_hide)
         general = QFormLayout()
         general.addRow("Fonte da tradução:", font_row)
         general.addRow("", self.colorize)
+        general.addRow("", self.realtime)
         general.addRow("Atalho para traduzir:", self.hotkey_translate)
         general.addRow("Atalho para colorir:", self.hotkey_colorize)
         general.addRow("Atalho para esconder:", self.hotkey_hide)
@@ -169,6 +179,7 @@ class SettingsDialog(QDialog):
             claude_model=self.claude_model.currentText().strip() or CLAUDE_MODELS[0],
             font_family="" if self.default_font.isChecked() else self.font_family.currentFont().family(),
             colorize=self.colorize.isChecked(),
+            realtime=self.realtime.isChecked(),
             hotkey_translate=self.hotkey_translate.keySequence().toString(portable),
             hotkey_colorize=self.hotkey_colorize.keySequence().toString(portable),
             hotkey_hide=self.hotkey_hide.keySequence().toString(portable),

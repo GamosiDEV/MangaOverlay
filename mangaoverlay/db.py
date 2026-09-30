@@ -11,6 +11,7 @@ import json
 import sqlite3
 import threading
 import unicodedata
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from pathlib import Path
@@ -333,6 +334,12 @@ class Database:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    @contextmanager
+    def locked(self):
+        """A conexão, sob a trava, para operações em massa (exportar e importar dados, ver transfer.py)."""
+        with self._lock:
+            yield self._conn
 
     # --- obras ------------------------------------------------------------------
 
