@@ -351,7 +351,8 @@ Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s numa RTX 5050
 - Sem o tempo real, se a página rolar, a tradução e a cor ficam no lugar antigo até o próximo atalho.
 - No tempo real, mudanças na interface do leitor (botões que aparecem e somem) também contam como mudança de tela e geram uma nova leitura. Se a página já foi traduzida, a tradução vem do banco, sem custo.
 - Com OCR local, o idioma de origem precisa estar certo no menu da bandeja. "Detectar" só funciona nos motores em que o LLM lê a imagem.
-- Textos fora dos balões vêm desligados por padrão, porque o detector os confunde com textos de sites e menus.
+- Textos fora dos balões vêm desligados por padrão, porque o detector os confunde com textos de sites e menus. Ligados (Configurações), valem os que estão na faixa da página onde há balões; numa HQ sem balões (texto sobre o desenho), valem todos os que estiverem na escrita do idioma de origem.
+- Numa obra com capítulos importados e traduzidos, as falas salvas aparecem na tela mesmo sem balões e com a opção acima desligada: só o que está no banco da obra é mostrado, então menus e sites nunca entram.
 - Não há versão para macOS.
 
 ## Licença
