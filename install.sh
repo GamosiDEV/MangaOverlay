@@ -95,6 +95,11 @@ missing=()
 for lib in "${!APT_PACKAGES[@]}"; do
     has_library "$lib" || missing+=("$lib")
 done
+# Modo em tempo real no Wayland: a tela é transmitida pelo PipeWire e lida pelo GStreamer
+APT_PACKAGES[gst-launch-1.0]=gstreamer1.0-tools DNF_PACKAGES[gst-launch-1.0]=gstreamer1 PACMAN_PACKAGES[gst-launch-1.0]=gstreamer
+APT_PACKAGES[pipewiresrc]=gstreamer1.0-pipewire DNF_PACKAGES[pipewiresrc]=pipewire-gstreamer PACMAN_PACKAGES[pipewiresrc]=gst-plugin-pipewire
+command -v gst-launch-1.0 >/dev/null || missing+=(gst-launch-1.0)
+gst-inspect-1.0 pipewiresrc >/dev/null 2>&1 || missing+=(pipewiresrc)
 if ((${#missing[@]})); then
     packages=()
     if command -v apt-get >/dev/null; then

@@ -8,7 +8,9 @@ Fica em segundo plano, na bandeja do sistema. A tradução não recebe cliques, 
 |---|---|
 | **Ctrl+Alt+M** | Traduz os balões da tela (e colore, se "Colorir junto com a tradução" estiver marcado no menu) |
 | **Ctrl+Alt+C** | Mostra a página de mangá colorida |
-| **Ctrl+Alt+N** | Esconde tudo e volta ao original |
+| **Ctrl+Alt+N** | Esconde tudo e volta ao original; durante uma tradução, cancela o pedido |
+
+Com o **modo em tempo real** ligado, nem é preciso apertar o atalho: o app percebe quando a página muda (troca de página, rolagem) e traduz de novo sozinho.
 
 Roda no **Windows 10/11 (64 bits)** e no **Linux** (testado no Ubuntu com GNOME, Wayland e X11).
 
@@ -146,7 +148,9 @@ O `constraints.txt` fixa as versões testadas das bibliotecas; sem ele, o pip in
 1. **Abra o app.** Ele fica na bandeja; na primeira vez, carrega os modelos (alguns segundos).
 2. **Escolha o idioma de origem** no menu do ícone da bandeja (japonês, coreano, chinês ou inglês). O destino padrão é português.
 3. **Abra uma página de mangá** em qualquer leitor e aperte **Ctrl+Alt+M**. Um pontinho azul no canto indica que está traduzindo; em seguida, a tradução aparece por cima dos balões.
-4. **Ctrl+Alt+N** esconde a tradução. Para a próxima página, aperte Ctrl+Alt+M de novo.
+4. **Ctrl+Alt+N** esconde a tradução. Para a próxima página, aperte Ctrl+Alt+M de novo, ou ligue o [tempo real](#tempo-real) para o app traduzir sozinho a cada página.
+
+Mudou de ideia no meio de uma tradução? **Ctrl+Alt+N**, "Cancelar a tradução" no menu ou um clique no ícone da bandeja cancelam o pedido.
 
 O motor padrão é o **offline (NLLB)**: grátis, sem conta e sem internet, com qualidade razoável. Para traduções bem melhores, use a OpenAI ou o Claude:
 
@@ -171,11 +175,25 @@ No menu da bandeja, **Obra** escolhe o mangá que você está lendo (ou cria um 
 
 A busca no banco é primeiro pelo texto exato e, se não achar, por semelhança (80% ou mais, em falas com 4 caracteres ou mais), porque o OCR às vezes lê um risco do desenho como um caractere a mais.
 
+### Tempo real
+
+Liga e desliga em **Configurações** ou no menu da bandeja ("Tempo real"). O app observa a tela em miniatura, duas vezes por segundo, o que é leve:
+
+- quando a página muda (troca de página, rolagem, outra imagem), a tradução antiga some na hora;
+- quando a tela para de mudar, o app traduz de novo, e colore também, se "Colorir junto com a tradução" estiver marcado.
+
+Durante a rolagem ele espera terminar, sem traduzir no meio. Telas sem mangá não geram avisos. **Ctrl+Alt+N** esconde a tradução até a próxima mudança de página.
+
+- **GNOME/Wayland:** a observação usa a transmissão de tela do sistema (PipeWire). Na primeira vez, o GNOME pergunta qual tela compartilhar e depois lembra da resposta. Enquanto o tempo real estiver ligado, aparece o ícone de compartilhamento de tela na barra superior; parar o compartilhamento por ali desliga o modo. O instalador instala o GStreamer necessário (`gstreamer1.0-tools` e `gstreamer1.0-pipewire`).
+- **Windows:** a tradução fica invisível para capturas de tela, então o app enxerga a página por baixo dela sem piscar.
+
+Com um motor pago, cada página nova é uma tradução, como se você apertasse o atalho; voltar a uma página já traduzida continua sem custo.
+
 ### Colorização
 
 **Ctrl+Alt+C** mostra a página de mangá da tela colorida. Para colorir junto com a tradução, marque "Colorir junto com a tradução" no menu.
 
-As cores são uma interpretação do modelo: podem variar de uma página para outra (o cabelo de um personagem pode mudar de cor) e ficam mais fracas em cenários complexos. Só a cor muda: traço, retículas e texto ficam exatamente como estavam. É preciso haver balões na tela, porque é a partir deles que o app encontra a página.
+As cores são uma interpretação do modelo: podem variar de uma página para outra (o cabelo de um personagem pode mudar de cor) e ficam mais fracas em cenários complexos. Só a cor muda: traço, retículas e texto ficam exatamente como estavam. É preciso haver balões na tela, porque é a partir deles que o app encontra a página. Só a página é colorida, sem a interface em volta: o app separa a página do fundo do leitor (escuro, cinza claro como no Paint, ou branco com um scan amarelado).
 
 ### Importar capítulos
 
@@ -197,12 +215,30 @@ Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continu
 - Antes de enviar aparecem as falas a traduzir e o custo estimado; no fim, o custo real informado pela API.
 - Falas repetidas (はい, え?!…) vão uma vez só, e falas já traduzidas nunca são enviadas de novo.
 - Erros temporários (limite de requisições, servidor, rede) são tentados de novo sozinhos; se persistirem, o lote pausa em vez de desperdiçar pedidos. Erros definitivos (chave inválida, sem crédito) pausam com a mensagem. Falas que o modelo esquecer de devolver são pedidas de novo, só elas.
-- Fechar o app no meio não perde nada: o lote continua sozinho ao abrir de novo. "Pausar" deixa o lote parado até "Retomar tradução em lote" no menu (que também tenta de novo os blocos que falharam).
+- Fechar o app no meio não perde nada: o lote continua sozinho ao abrir de novo. "Pausar" deixa o lote parado até "Retomar tradução em lote" no menu (que também tenta de novo os blocos que falharam). "Cancelar lote…" descarta o lote, que não continua nem aparece em "Retomar"; o que já foi traduzido fica salvo.
 - **Acompanhar o que está acontecendo:** a janela do lote mostra o bloco atual, o custo até agora, o tempo decorrido e quanto falta. **Mostrar detalhes** expande o passo a passo: cada bloco enviado (capítulo e páginas), quantas falas voltaram, em quanto tempo, tokens e custo, novas tentativas depois de erros temporários, falas que o modelo pulou, termos anotados no glossário, atualizações da memória, andamento da Batch API e o motivo de qualquer pausa. Se o lote pausar por erro, os detalhes abrem sozinhos. A janela pode ser fechada e reaberta a qualquer momento por "Andamento da tradução em lote…" no menu, e o mesmo registro fica no arquivo `traducao-em-lote.log` (veja [Onde ficam os arquivos](#onde-ficam-os-arquivos)).
 
 **Batch API da OpenAI:** com os motores da OpenAI, a tela oferece "Batch API" como modo de envio, com **50% de desconto**. O app envia todos os pedidos de uma vez e a OpenAI processa em segundo plano (em geral em minutos, com garantia de até 24 horas). Pode fechar o app ou desligar o computador: o id do lote fica no banco e o app confere o andamento a cada minuto quando está aberto. Quando termina, as traduções são gravadas e, se o modelo tiver pulado alguma fala, um novo envio leva só as que faltaram (até 2 vezes). "Pausar" cancela o lote na OpenAI guardando o que já tinha voltado; "Retomar" envia só o resto.
 
 O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: OpenAI, Claude, NLLB offline (grátis) e Google gratuito. Na leitura, qualquer tradução já paga com IA da obra é usada, mesmo que você esteja lendo com outro motor ou modelo.
+
+### Exportar e importar dados
+
+Em **Exportar e importar dados** no menu da bandeja dá para levar obras, capítulos e traduções para outro computador, fazer backup ou compartilhar traduções.
+
+**Exportar** gera um arquivo `.zip`. Escolha as obras e o que levar delas, em qualquer combinação:
+
+| Parte | O que leva |
+|---|---|
+| **Obras** | Idioma, lista de personagens e memória da obra (resumo e glossário) |
+| **Capítulos e páginas** | Capítulos importados, com a posição e o texto lido de cada balão |
+| **Traduções** | As traduções salvas, de todos os motores (e, se marcado, as feitas sem obra) |
+
+As imagens das páginas não vão junto (o app só guarda onde elas estão). O nome e o idioma de cada obra vão sempre, para a importação saber onde colocar o resto.
+
+**Importar** mostra antes o que o arquivo traz e **nunca substitui** o que você já tem. Uma obra com o mesmo nome recebe só o que faltar, e capítulos, traduções, personagens e termos repetidos são pulados. Se algo der errado no meio, nada é gravado.
+
+Pela linha de comando: `mangaoverlay --export dados.zip [--obra NOME] [--partes obras,paginas,traducoes]` e `mangaoverlay --import dados.zip`.
 
 ### Personagens da obra
 
@@ -255,6 +291,8 @@ As chaves ficam no chaveiro do sistema (Configurações, no ícone da bandeja) o
 
 **Na primeira vez, o GNOME pergunta se o app pode capturar a tela.** É o portal do sistema; permita.
 
+**Tempo real não liga no GNOME.** Sem o GStreamer, o app avisa e desliga o modo: rode o `install.sh` de novo ou instale `gstreamer1.0-tools` e `gstreamer1.0-pipewire`. Se você recusou o compartilhamento de tela, ligue o modo de novo para o GNOME perguntar outra vez.
+
 **"Nenhum texto para traduzir encontrado na tela."** Confira o idioma de origem no menu. Textos fora dos balões (narração solta, onomatopeias) vêm desligados por padrão; dá para ligar em Configurações.
 
 **Está lento.** Veja em Configurações se "Usar a GPU" está marcado. Se estiver e continuar lento, o PyTorch pode não estar enxergando a placa (driver da NVIDIA antigo): atualize o driver e rode o instalador de novo. O instalador avisa quando isso acontece.
@@ -271,6 +309,9 @@ mangaoverlay --translate      # traduz a tela agora
 mangaoverlay --colorize       # mostra a página colorida
 mangaoverlay --hide           # esconde tudo
 mangaoverlay --download-models  # baixa todos os modelos de uma vez
+mangaoverlay --export dados.zip [--obra NOME]... [--partes obras,paginas,traducoes]
+                              # exporta obras, páginas e traduções (todas, sem --obra/--partes)
+mangaoverlay --import dados.zip # importa, sem substituir nada do que já existe
 mangaoverlay --image pagina.png [--out saida.png] [--engine local] [--source ja] [--color] [--no-translate]
                               # traduz e/ou colore um arquivo e grava o resultado (para testes)
 ```
@@ -286,6 +327,7 @@ Com o app aberto, `--translate`, `--colorize` e `--hide` só avisam a instância
 | Obras e traduções (SQLite) | `~/.local/share/MangaOverlay/mangaoverlay.db` | `%LOCALAPPDATA%\MangaOverlay\mangaoverlay.db` |
 | Modelos | `~/.cache/huggingface` e `~/.cache/MangaOverlay/easyocr` | `%USERPROFILE%\.cache\huggingface` e `%LOCALAPPDATA%\MangaOverlay\Cache\easyocr` |
 | Log do app (sem console) | — | `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log` |
+| Permissão do tempo real (GNOME) | `~/.config/MangaOverlay/screencast-token` | — |
 | Log da tradução em lote | `~/.local/state/MangaOverlay/log/traducao-em-lote.log` | `%LOCALAPPDATA%\MangaOverlay\Logs\traducao-em-lote.log` |
 
 ## Como funciona
@@ -298,20 +340,19 @@ Com o app aberto, `--translate`, `--colorize` e `--hide` só avisam a instância
 
 Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s numa RTX 5050 com o tradutor offline.
 
-**Colorização:** a partir dos balões detectados, o app expande um retângulo até encontrar a borda da página (faixa uniforme escura do leitor, ou elementos coloridos da interface), então menus e outras janelas não são coloridos. O modelo [manga-colorization-v2](https://github.com/qweasdd/manga-colorization-v2), exportado em ONNX e convertido para PyTorch, roda na página reduzida (cerca de 0,2 s na RTX 5050). Da saída do modelo só se aproveita a cor; o brilho vem da captura original em resolução total. O repositório original do modelo não declara licença; o espelho usado (`ifritraen/manga-colorization-v2-fp32`) declara Apache-2.0. Trate como uso pessoal.
+**Colorização:** a partir dos balões detectados, o app expande um retângulo até encontrar a borda da página: uma faixa uniforme com tom diferente do papel (medido dentro dos balões), como o fundo escuro do leitor ou o cinza claro de um visualizador, ou elementos coloridos da interface. Assim, menus e outras janelas não são coloridos. O modelo [manga-colorization-v2](https://github.com/qweasdd/manga-colorization-v2), exportado em ONNX e convertido para PyTorch, roda na página reduzida (cerca de 0,2 s na RTX 5050). Da saída do modelo só se aproveita a cor; o brilho vem da captura original em resolução total. O repositório original do modelo não declara licença; o espelho usado (`ifritraen/manga-colorization-v2-fp32`) declara Apache-2.0. Trate como uso pessoal.
 
-**Instalador:** o [uv](https://github.com/astral-sh/uv) baixa um Python 3.12 próprio para a pasta do app e cria o ambiente; o PyTorch vem do índice oficial na variante da placa (cu128 para compute capability 7.5 ou mais, cu126 para placas mais antigas, CPU sem NVIDIA); as outras bibliotecas vêm nas versões do `constraints.txt`. A cada release, uma CI instala do zero no Windows e no Ubuntu, traduz uma página de teste e desinstala.
+**Tempo real:** as miniaturas (cinza, 256 px de largura, 2 por segundo) vêm da captura do Qt no Windows e no X11, e do portal ScreenCast via GStreamer (`pipewiresrc`) no GNOME/Wayland. A tela "mudou" quando mais de 1% da miniatura muda em relação à tela traduzida (o relógio e o cursor ficam bem abaixo disso), e "parou" depois de dois quadros seguidos quase iguais.
+
+**Instalador:** o [uv](https://github.com/astral-sh/uv) baixa um Python 3.12 próprio para a pasta do app e cria o ambiente; o PyTorch vem do índice oficial na variante da placa (cu128 para compute capability 7.5 ou mais, cu126 para placas mais antigas, CPU sem NVIDIA); as outras bibliotecas vêm nas versões do `constraints.txt`. A cada release, uma CI roda os testes automatizados (`python -m pytest tests`) e instala do zero no Windows e no Ubuntu, traduz uma página de teste e desinstala.
 
 ## Limitações conhecidas
 
-- Modo atual: **sob demanda** (aperte o atalho a cada página). Se a página rolar, a tradução e a cor ficam no lugar antigo até o próximo atalho.
+- Sem o tempo real, se a página rolar, a tradução e a cor ficam no lugar antigo até o próximo atalho.
+- No tempo real, mudanças na interface do leitor (botões que aparecem e somem) também contam como mudança de tela e geram uma nova leitura. Se a página já foi traduzida, a tradução vem do banco, sem custo.
 - Com OCR local, o idioma de origem precisa estar certo no menu da bandeja. "Detectar" só funciona nos motores em que o LLM lê a imagem.
 - Textos fora dos balões vêm desligados por padrão, porque o detector os confunde com textos de sites e menus.
 - Não há versão para macOS.
-
-## Próximos passos
-
-1. **Tempo real** (opção secundária nas configurações): transmissão contínua da tela, detecção de mudança (troca de página, rolagem) e nova tradução/colorização automática.
 
 ## Licença
 
