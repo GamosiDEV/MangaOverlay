@@ -104,6 +104,9 @@ class MangaOverlayApp(QObject):
         self._job_finished.connect(self._on_job_finished, Qt.ConnectionType.QueuedConnection)
         self._overlays: dict[str, OverlayWindow] = {}
         self._busy = False
+        # Pedido da tela em andamento: o número descarta resultados de pedidos cancelados; o evento avisa o pipeline
+        self._request = 0
+        self._cancel: threading.Event | None = None
         self._settings_open = False
 
         self.importer = Importer(self.db, self.pipeline, self)
@@ -117,6 +120,7 @@ class MangaOverlayApp(QObject):
         self._batch_window = BatchWindow()
         self._batch_window.setWindowIcon(app_icon())
         self._batch_window.pause_requested.connect(self._pause_batches)
+        self._batch_window.cancel_requested.connect(self._cancel_batch)
         # Lotes da Batch API esperam a OpenAI (minutos a horas): confere o andamento a cada minuto
         self._batch_poll = QTimer(self)
         self._batch_poll.setInterval(60_000)
@@ -156,6 +160,8 @@ class MangaOverlayApp(QObject):
         self._translate_action = menu.addAction("", self.translate_screen)
         self._colorize_action = menu.addAction("", self.colorize_screen)
         self._hide_action = menu.addAction("", self.hide_translation)
+        self._cancel_action = menu.addAction("Cancelar a tradução", self.cancel_translation)
+        self._cancel_action.setVisible(False)
         self._colorize_toggle = menu.addAction("Colorir junto com a tradução")
         self._colorize_toggle.setCheckable(True)
         self._colorize_toggle.toggled.connect(lambda on: on != self.config.colorize and self._update_config(colorize=on))
@@ -233,6 +239,7 @@ class MangaOverlayApp(QObject):
                 action.setChecked(action.data() == value)
 
     def _refresh_import_actions(self) -> None:
+        self._cancel_action.setVisible(self._busy)
         running = self.importer.running
         pending = 0 if running else len(self.db.pending_pages())
         self._resume_action.setText(f"Retomar importação ({pending} página(s) pendente(s))")
@@ -415,6 +422,23 @@ class MangaOverlayApp(QObject):
         elif remote:
             self.batch_runner.start(self.config)
 
+    def _cancel_batch(self, batch_id: int) -> None:
+        """Descarta o lote. Em andamento, pausa primeiro (na Batch API, cancela na OpenAI) e descarta quando a pausa
+        terminar; pausado, descarta na hora. O que já foi traduzido fica salvo."""
+        batch = next((b for b in self.db.batches(("ativo", "pausado")) if b.id == batch_id), None)
+        if batch is None:
+            return
+        if batch.state == "pausado":
+            self._discard_batch(batch_id)
+            return
+        self.batch_runner.cancelling.add(batch_id)
+        self._pause_batches()
+
+    def _discard_batch(self, batch_id: int) -> None:
+        self.db.set_batch_state(batch_id, "cancelado")
+        self.batch_runner.note("aviso", f"Lote {batch_id} cancelado a pedido; as falas já traduzidas continuam salvas.")
+        self._batch_window.show_cancelled(self.db.batch_summary(batch_id))
+
     def _poll_remote_batches(self) -> None:
         if self.batch_runner.running:
             return
@@ -431,6 +455,11 @@ class MangaOverlayApp(QObject):
         self._batch_window.activateWindow()
 
     def _on_batch_finished(self, outcome) -> None:
+        cancelling = outcome.batch_id in self.batch_runner.cancelling
+        self.batch_runner.cancelling.discard(outcome.batch_id)
+        if cancelling and outcome.state != "concluido":
+            self._discard_batch(outcome.batch_id)
+            return
         self._batch_window.show_outcome(outcome)
         if not self._batch_window.isVisible():
             if outcome.state == "concluido":
@@ -520,7 +549,8 @@ class MangaOverlayApp(QObject):
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.translate_screen()
+            # Clique no ícone: traduz; durante uma tradução, cancela
+            self.cancel_translation() if self._busy else self.translate_screen()
 
     def _notify(self, message: str, timeout: int = 8000, warning: bool = False) -> None:
         icon = QSystemTrayIcon.MessageIcon.Warning if warning else QSystemTrayIcon.MessageIcon.Information
@@ -600,7 +630,8 @@ class MangaOverlayApp(QObject):
 
     def _on_hotkey(self, action: str) -> None:
         if action == "hide":
-            self.hide_translation()
+            # Durante uma tradução, o atalho de esconder cancela o pedido
+            self.cancel_translation() if self._busy else self.hide_translation()
         elif action == "translate":
             self.translate_screen()
         elif action == "colorize":
@@ -634,17 +665,47 @@ class MangaOverlayApp(QObject):
         if self._busy:
             return
         self._busy = True
+        self._request += 1
+        self._cancel = threading.Event()
+        self._set_busy_tooltip(True)
         self.hide_translation()
         # Espera o compositor tirar a sobreposição da tela antes de capturar
-        QTimer.singleShot(250, lambda: self._grab(translate, colorize))
+        request = self._request
+        QTimer.singleShot(250, lambda: request == self._request and self._grab(translate, colorize))
+
+    def _current(self, handler):
+        """Só chama `handler` se o pedido ainda for o atual (não foi cancelado nem substituído)."""
+        request = self._request
+        return lambda value: handler(value) if request == self._request else None
+
+    def cancel_translation(self) -> None:
+        """Cancela o pedido da tela em andamento. O pipeline para no próximo ponto de checagem; um pedido já enviado
+        ao tradutor termina em segundo plano (e a tradução fica salva), mas não aparece na tela."""
+        if not self._busy:
+            return
+        self._cancel.set()
+        self._request += 1
+        self._busy = False
+        self._set_busy_tooltip(False)
+        self.hide_translation()
+        _log("Tradução da tela cancelada")
+        self._notify("Tradução cancelada.", 2500)
+
+    def _set_busy_tooltip(self, busy: bool) -> None:
+        if busy and self.config.hotkey_hide:
+            self.tray.setToolTip(f"{APP_DISPLAY_NAME}: traduzindo… ({self.config.hotkey_hide} ou clique aqui cancela)")
+        elif busy:
+            self.tray.setToolTip(f"{APP_DISPLAY_NAME}: traduzindo… (clique aqui cancela)")
+        else:
+            self.tray.setToolTip(APP_DISPLAY_NAME)
 
     def _grab(self, translate: bool, colorize: bool) -> None:
         if is_wayland():
             # O portal bloqueia (e pode abrir o diálogo de permissão): roda em segundo plano.
             self._run(
                 screenshot.grab_wayland,
-                on_done=lambda result: self._process(screenshot.split_screens(*result), translate, colorize),
-                on_failed=self._on_failed,
+                on_done=self._current(lambda result: self._process(screenshot.split_screens(*result), translate, colorize)),
+                on_failed=self._current(self._on_failed),
             )
             return
         try:
@@ -660,17 +721,23 @@ class MangaOverlayApp(QObject):
         if busy is not None:
             busy.show_busy()
         config = replace(self.config)
+        cancel = self._cancel
 
         def work():
             return {
-                name: (self.pipeline.process(image, config, self.status.emit, translate, colorize), image.size)
+                name: (self.pipeline.process(image, config, self.status.emit, translate, colorize, cancel), image.size)
                 for name, image in shots.items()
             }
 
-        self._run(work, on_done=lambda results: self._on_processed(results, translate, colorize), on_failed=self._on_failed)
+        self._run(
+            work,
+            on_done=self._current(lambda results: self._on_processed(results, translate, colorize)),
+            on_failed=self._current(self._on_failed),
+        )
 
     def _on_processed(self, results: dict, translate: bool, colorize: bool) -> None:
         self._busy = False
+        self._set_busy_tooltip(False)
         self.hide_translation()
         font = base_font(self.config.font_family)
         texts = pages = 0
@@ -695,6 +762,7 @@ class MangaOverlayApp(QObject):
 
     def _on_failed(self, exc: Exception) -> None:
         self._busy = False
+        self._set_busy_tooltip(False)
         self.hide_translation()
         _log(f"Falha ao processar a tela: {exc.__class__.__name__}: {exc}")
         if isinstance(exc, screenshot.CaptureCancelled):

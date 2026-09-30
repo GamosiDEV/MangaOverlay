@@ -175,6 +175,8 @@ class BatchRunner(QObject):
         self._pause_requested = False
         # Último estado visto de cada lote da Batch API: o log só registra quando algo muda
         self._remote_seen: dict[int, tuple] = {}
+        # Lotes que o app está cancelando: a pausa deles não sugere "Retomar" (o app registra o cancelamento)
+        self.cancelling: set[int] = set()
 
     @property
     def running(self) -> bool:
@@ -215,6 +217,10 @@ class BatchRunner(QObject):
         except OSError:
             pass  # o log em arquivo é um extra; a janela continua recebendo
 
+    def note(self, level: str, message: str) -> None:
+        """Registro vindo de fora do executor (ex.: o app cancelou um lote), no mesmo log e arquivo."""
+        self._log(level, message)
+
     def _log_start(self, batch: Batch, key: TranslationKey, total: int, pending: int) -> None:
         work = self._db.work(batch.work_id)
         engine = key.model if key.engine in LLM_ENGINES else ENGINES.get(key.engine, key.engine)
@@ -239,6 +245,8 @@ class BatchRunner(QObject):
             self._log("ok", f"Lote {batch.id} concluído: {s.done} de {s.requests} bloco(s){tokens} · custo real {cost}")
             if s.failed:
                 self._log("aviso", f"{s.failed} bloco(s) ficaram com falas sem tradução (em geral reticências e onomatopeias que o modelo não traduz).")
+        elif state == "pausado" and batch.id in self.cancelling:
+            self._log("info", f"Lote {batch.id} parado para ser cancelado ({s.done} de {s.requests} bloco(s) prontos, {cost}).")
         elif state == "pausado":
             if error:
                 self._log("erro", f"Lote {batch.id} pausado: {error}")

@@ -31,6 +31,10 @@ class PipelineError(Exception):
     pass
 
 
+class Cancelled(Exception):
+    """O usuário cancelou o pedido (ver Pipeline.process)."""
+
+
 @dataclass
 class OverlayItem:
     fill: Box  # retângulo que cobre o texto original
@@ -158,6 +162,8 @@ class Pipeline:
         self._cache = _Cache()
         # Falas das últimas telas: dão contexto de cena para os LLMs
         self._context: deque[str] = deque(maxlen=30)
+        # Pedido da tela em andamento: quando ligado, o processamento para no próximo ponto de checagem
+        self._cancel: threading.Event | None = None
 
     def clear_cache(self, work_id: int | None = None, forget_saved: bool = False) -> int:
         """Esvazia o cache em memória; com forget_saved, apaga também as traduções salvas da obra."""
@@ -204,9 +210,20 @@ class Pipeline:
         status: Callable[[str], None] = lambda _msg: None,
         translate: bool = True,
         colorize: bool = False,
+        cancel: threading.Event | None = None,
     ) -> ScreenResult:
+        """Com `cancel`, levanta Cancelled no próximo ponto de checagem depois que ele for ligado. Uma chamada ao
+        tradutor já em andamento não é interrompida; o que ela devolver é salvo no banco antes da checagem."""
         with self._interactive():
-            return self._process(image, config, status, translate, colorize)
+            self._cancel = cancel
+            try:
+                return self._process(image, config, status, translate, colorize)
+            finally:
+                self._cancel = None
+
+    def _check(self) -> None:
+        if self._cancel is not None and self._cancel.is_set():
+            raise Cancelled
 
     def _process(
         self,
@@ -222,6 +239,7 @@ class Pipeline:
                 "Para usar 'Detectar idioma', escolha um motor em que o LLM lê a imagem. "
                 "Com OCR local, defina o idioma de origem no menu da bandeja."
             )
+        self._check()
         self._prepare(config, status)
         if config.current_work != self._work:
             # Outra obra: as falas recentes da anterior não servem de contexto
@@ -233,6 +251,7 @@ class Pipeline:
         if colorize:
             result.color_box = find_page(image, detection.bubbles)
             if result.color_box is not None:
+                self._check()
                 if self._colorizer is None:
                     status("Carregando o colorizador (na primeira vez ele é baixado, ~120 MB)…")
                     self._colorizer = Colorizer(self._device)
@@ -241,6 +260,7 @@ class Pipeline:
         regions, verify_only = detection.regions, frozenset()
         if translate and self._db is not None and config.current_work is not None and config.source_lang != AUTO:
             regions, verify_only = self._with_saved_extras(image, detection, config)
+        self._check()
         if translate and regions:
             # Com a página colorida, o fundo que cobre o texto original acompanha a cor nova do balão
             base = image
@@ -317,6 +337,7 @@ class Pipeline:
         results = {i: saved.get(normalize(t)) for i, (_b, t) in enumerate(projected)}
         pending = [(i, t) for i, (_b, t) in enumerate(projected) if results[i] is None]
         if pending and not config.saved_only:
+            self._check()
             # Texto da página importada (não de menus): pode ir ao tradutor
             fake = [Region(text_box=b, area=b, bubble=None) for b, _t in projected]
             new = self._call_translator(image, fake, pending, config, status)
@@ -424,12 +445,14 @@ class Pipeline:
                     "procurar no banco). Escolha a origem no menu da bandeja."
                 )
             # Sem idioma definido não há OCR local, logo nem chave para o banco: o LLM lê a imagem direto.
+            self._check()
             return self._call_translator(image, regions, [(i, "") for i in indices], config)
 
         status("Lendo os textos…")
         readable = self._read(crops, indices, source)
         if not readable:
             return {}
+        self._check()
 
         results: dict[int, Result] = {}
         pending = readable
@@ -454,6 +477,7 @@ class Pipeline:
             results.update({index: Result(0, text, "") for index, text in pending})
             return results
         if pending:
+            self._check()
             new = self._call_translator(image, regions, pending, config, status)
             results.update(new)
             local_text = dict(pending)

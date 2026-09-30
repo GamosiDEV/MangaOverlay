@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -193,6 +194,7 @@ class BatchWindow(QWidget):
     """
 
     pause_requested = Signal()
+    cancel_requested = Signal(int)  # id do lote a descartar
 
     _MAX_ENTRIES = 3000
     _LEVELS = {  # nível -> (símbolo, cor)
@@ -215,6 +217,11 @@ class BatchWindow(QWidget):
         self._timing.setStyleSheet("color: palette(placeholder-text);")
         self._button = QPushButton("Pausar")
         self._button.clicked.connect(self._on_button)
+        self._cancel_button = QPushButton("Cancelar lote…")
+        self._cancel_button.setToolTip("Descarta o lote: não continua nem aparece em “Retomar”. O que já foi traduzido fica salvo.")
+        self._cancel_button.clicked.connect(self._on_cancel)
+        self._cancel_button.setVisible(False)
+        self._batch_id: int | None = None
         self._toggle = QPushButton()
         self._toggle.setCheckable(True)
         self._toggle.toggled.connect(self._set_expanded)
@@ -257,6 +264,7 @@ class BatchWindow(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self._toggle)
         buttons.addStretch(1)
+        buttons.addWidget(self._cancel_button)
         buttons.addWidget(self._button)
         layout = QVBoxLayout(self)
         layout.addWidget(self._title)
@@ -283,6 +291,8 @@ class BatchWindow(QWidget):
         self._details.setText("Pode fechar esta janela: a tradução continua em segundo plano.")
         self._button.setText("Pausar")
         self._button.setEnabled(True)
+        self._cancel_button.setVisible(False)  # aparece quando o primeiro bloco disser qual é o lote
+        self._batch_id = None
         self._started_at = time.monotonic()
         self._first_done = None
         self._last_done = self._last_total = 0
@@ -297,6 +307,10 @@ class BatchWindow(QWidget):
             self._clock.start()
         if self._first_done is None:
             self._first_done = progress.done
+        if not self._finished:
+            self._batch_id = progress.batch_id
+            self._cancel_button.setVisible(True)
+            self._cancel_button.setEnabled(True)
         self._last_done, self._last_total = progress.done, progress.total
         self._bar.setRange(0, max(1, progress.total))
         self._bar.setValue(progress.done)
@@ -318,6 +332,10 @@ class BatchWindow(QWidget):
 
     def show_outcome(self, outcome: BatchOutcome) -> None:
         self._finished = True
+        self._batch_id = outcome.batch_id
+        # Pausado dá para descartar; concluído ou interrompido (continua ao abrir o app), não
+        self._cancel_button.setVisible(outcome.state == "pausado")
+        self._cancel_button.setEnabled(True)
         self._clock.stop()
         self._update_timing()
         s = outcome.summary
@@ -408,6 +426,31 @@ class BatchWindow(QWidget):
         if not self._finished and done_now > 0 and remaining > 0:
             text += f" · faltam cerca de {_duration(elapsed / done_now * remaining)}"
         self._timing.setText(text)
+
+    def show_cancelled(self, summary) -> None:
+        cost = pricing.format_cost(summary.cost) if summary.cost else "US$ 0"
+        self._finished = True
+        self._clock.stop()
+        self._title.setText(f"Lote cancelado ({summary.done} de {summary.requests} bloco(s) prontos). Custo: {cost}.")
+        self._details.setText("As falas já traduzidas continuam salvas e aparecem na leitura, sem nova cobrança.")
+        self._cancel_button.setVisible(False)
+        self._button.setText("Fechar")
+        self._button.setEnabled(True)
+
+    def _on_cancel(self) -> None:
+        if self._batch_id is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_DISPLAY_NAME,
+            "Cancelar este lote?\n\nEle para agora e não aparece mais em “Retomar tradução em lote”. As falas já "
+            "traduzidas continuam salvas. Na Batch API, o pedido também é cancelado na OpenAI.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._cancel_button.setEnabled(False)
+        self._cancel_button.setText("Cancelando…")
+        self.cancel_requested.emit(self._batch_id)
 
     def _on_button(self) -> None:
         if self._finished:
