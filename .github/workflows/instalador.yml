@@ -46,8 +46,9 @@ jobs:
       # O QtGui precisa da libEGL, que a máquina Ubuntu do GitHub não tem
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1
-      # Só o que os testes usam (sem PyTorch e modelos): detecção da página, tempo real, exportar e importar
-      - run: python -m pip install numpy pillow platformdirs PySide6 pytest -c constraints.txt
+      # Só o que os testes usam (sem PyTorch e modelos): detecção da página, tempo real, exportar e importar, gerar
+      # capítulos (o pipeline importa o keyring, das chaves de API)
+      - run: python -m pip install numpy pillow platformdirs PySide6 keyring pytest -c constraints.txt
       - run: python -m pytest tests -q
 
   windows:

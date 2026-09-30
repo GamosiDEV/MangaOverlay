@@ -191,6 +191,18 @@ class ChapterSummary:
 
 
 @dataclass(frozen=True)
+class StoredPage:
+    """Página importada com as falas lidas (caixa no arquivo e texto), para gerar o capítulo traduzido."""
+
+    id: int
+    number: int
+    origin: str
+    file: str
+    state: str  # "pendente", "lida" ou "erro"
+    regions: list[tuple[tuple[int, int, int, int], str]]
+
+
+@dataclass(frozen=True)
 class Character:
     name: str  # como aparece na tradução (obrigatório)
     original: str = ""  # como aparece no original (opcional)
@@ -514,6 +526,16 @@ class Database:
             )
             self._conn.execute("COMMIT")
 
+    def translation_sources(self, work_id: int | None, target: str) -> list[str]:
+        """Idiomas de origem com traduções salvas da obra para o destino (o mais usado primeiro)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT idioma_origem FROM traducoes WHERE IFNULL(obra_id, 0) = ? AND idioma_destino = ?
+                   GROUP BY idioma_origem ORDER BY COUNT(*) DESC""",
+                (work_id or 0, target),
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def forget_translations(self, work_id: int | None) -> int:
         """Apaga as traduções salvas de uma obra (ou as "sem obra"). Retorna quantas foram apagadas."""
         with self._lock:
@@ -721,6 +743,32 @@ class Database:
                 chapter_ids,
             ).fetchall()
         return [row[0] for row in rows]
+
+    # --- capítulos traduzidos em imagem ----------------------------------------------
+
+    def chapter_info(self, chapter_id: int) -> tuple[int, str, float] | None:
+        """(obra, nome, ordem) do capítulo."""
+        with self._lock:
+            row = self._conn.execute("SELECT obra_id, nome, ordem FROM capitulos WHERE id = ?", (chapter_id,)).fetchone()
+        return tuple(row) if row else None
+
+    def stored_pages(self, chapter_id: int) -> list[StoredPage]:
+        """Todas as páginas do capítulo (lidas ou não), na ordem, com as falas de cada uma em ordem de leitura."""
+        with self._lock:
+            pages = self._conn.execute(
+                """SELECT p.id, p.numero, c.origem, p.arquivo, p.estado FROM paginas p JOIN capitulos c ON c.id = p.capitulo_id
+                   WHERE c.id = ? ORDER BY p.numero""",
+                (chapter_id,),
+            ).fetchall()
+            rows = self._conn.execute(
+                """SELECT r.pagina_id, r.x0, r.y0, r.x1, r.y1, r.texto_original FROM regioes r
+                   JOIN paginas p ON p.id = r.pagina_id WHERE p.capitulo_id = ? ORDER BY p.numero, r.ordem""",
+                (chapter_id,),
+            ).fetchall()
+        regions: dict[int, list[tuple[tuple[int, int, int, int], str]]] = {}
+        for page_id, x0, y0, x1, y1, text in rows:
+            regions.setdefault(page_id, []).append(((x0, y0, x1, y1), text))
+        return [StoredPage(i, number, origin, file, state, regions.get(i, [])) for i, number, origin, file, state in pages]
 
     def create_batch(
         self,

@@ -16,6 +16,7 @@ Plano das próximas funcionalidades do MangaOverlay, decididas em 28/09/2026. Ca
 | Levantamento de nomes | **Rápido por padrão** (só os 2–3 primeiros capítulos, com o modelo principal). **Completo** opcional, com um modelo específico e barato (padrão `gpt-5.4-nano`). |
 | Reaproveitamento | Lista de personagens e memória ficam salvas por obra. Nos lotes seguintes, o levantamento só olha os capítulos novos. |
 | Revisão de nomes | Primeiro correção local e grátis (substituição de variações conhecidas). Depois, revisão com IA só das falas ambíguas. |
+| Capítulos traduzidos em imagem (30/09/2026) | Gerados no PC a partir dos capítulos importados, para ler em qualquer leitor (inclusive no celular). Formato padrão **CBZ**, com opção de **pasta de imagens**. Sempre oferece traduzir as falas que faltam, com o custo antes. Cada usuário gera o que quiser para uso próprio; distribuir as imagens é responsabilidade de quem gera. |
 
 ## Fases
 
@@ -108,6 +109,33 @@ Base de tudo: sem ela, o lote não tem onde guardar os resultados.
 
 - [ ] Transmissão contínua da tela pelo portal ScreenCast/PipeWire, como opção secundária nas configurações (o atalho continua sendo o modo principal).
 - [ ] Detecção de mudança (troca de página, rolagem) e nova tradução/colorização automática, usando o banco para mostrar na hora o que já foi traduzido.
+
+### Fase 9: Gerar capítulos traduzidos (CBZ ou pasta de imagens)
+
+Decidida em 30/09/2026. A ideia: traduzir no PC e ler no celular, num leitor comum (Mihon/Tachiyomi, Perfect Viewer), sem overlay.
+
+- [x] Geração a partir do que já está no banco: abre a página original (`load_page`), busca a tradução de cada fala salva (qualquer motor da obra, com preferência pelo atual) e desenha com o mesmo `paint_items` do overlay, na resolução original.
+- [x] O detector roda de novo em cada página só para recuperar o contorno do balão (o banco guarda apenas a caixa do texto); o desenho não apaga a borda do balão.
+- [x] Saída em **CBZ** (padrão, com `ComicInfo.xml`) ou **pasta de imagens**, escolhida na janela. Páginas em JPG de alta qualidade; páginas em branco, não lidas ou com erro vão como no original.
+- [x] Falas sem tradução salva: a janela sempre mostra quantas são e oferece traduzi-las com o motor atual, com o custo estimado antes. Sem a opção, o original fica visível.
+- [x] Botão "Gerar capítulo(s) traduzido(s)…" na janela de obras e item no menu da bandeja; janela de progresso com Parar e "Abrir pasta" no fim.
+- [x] Linha de comando: `--gerar PASTA` com `--obra` (e `--formato`, `--capitulo`, `--traduzir-faltantes`).
+- [x] Testes com uma página sintética (sem modelos) e seção no README, com a nota de responsabilidade.
+
+- [x] Traduções feitas quando a obra tinha outro idioma de origem também valem (o texto lido é o mesmo; só a chave mudou). Achado no teste com um banco real: uma obra passou de "en" para "ja" depois de traduzida e nada era encontrado.
+
+**Pronto quando:** um capítulo importado e traduzido vira um CBZ que abre num leitor de celular com as falas traduzidas nos balões, sem nenhuma chamada nova à API. ✅ Verificado com um volume real (PDF, 202 páginas): 1.071 falas desenhadas em 34 s na RTX 5050, nenhuma chamada à API, ~150 MB. Falta abrir o arquivo num leitor de celular. Defeito visível anotado na Fase 10 (caixas retangulares).
+
+### Fase 10: Qualidade do texto nas imagens geradas
+
+- [ ] Opção de fonte de quadrinhos nas Configurações.
+- [ ] Área de escrita que acompanha a forma do balão (elipse) em vez do retângulo do texto, e hifenização (balões japoneses altos e estreitos).
+- [ ] Caixas retangulares de narração e placas: cobertura retangular. Hoje a cobertura é recortada em elipse (pensada para balões redondos) e sobram pedaços de letras nos cantos; no arquivo gerado isso aparece mais que na tela. O mesmo vale para o fundo cinza que às vezes cobre onomatopeias em quadros.
+- [ ] Guardar o balão de cada fala no banco já na importação, para a geração não precisar rodar o detector de novo.
+
+### Fase 11 (opcional): Inpainting
+
+- [ ] Reconstruir o desenho por baixo de textos fora dos balões (narração, placas) com o LaMa, baixado só quando o recurso for usado.
 
 ## Custos de referência (gpt-4.1-mini)
 

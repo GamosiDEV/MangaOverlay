@@ -4,7 +4,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from difflib import SequenceMatcher
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -602,6 +602,47 @@ class Pipeline:
                         readable.append((len(regions) - 1, text))
         boxes = [(regions[i].text_box, text) for i, text in readable]
         return sorted(boxes, key=lambda item: _reading_order(item[0], image.height, config.source_lang))
+
+    def page_layout(self, image: Image.Image, boxes: list[Box], config: Config) -> list[Region]:
+        """Região de cada fala salva de uma página importada, com o balão e a área de escrita que o detector achar
+        em volta dela (o banco guarda só a caixa do texto). Sem balão correspondente, escreve sobre a própria caixa."""
+        with self._background():
+            self._prepare(config, lambda _msg: None)
+            detected = self._detector.detect(image, profile="file").regions
+
+        def shared(a: Box, b: Box) -> int:
+            return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+
+        regions = []
+        for box in boxes:
+            candidates = [r for r in detected if _overlaps(r.text_box, box)]
+            match = max(candidates, key=lambda r: shared(r.text_box, box), default=None)
+            regions.append(Region(box, match.area, match.bubble) if match else Region(box, box, None))
+        return regions
+
+    def translate_stored(
+        self,
+        image: Image.Image,
+        regions: list[Region],
+        pending: list[tuple[int, str]],
+        config: Config,
+        status: Callable[[str], None] = lambda _msg: None,
+    ) -> dict[int, str]:
+        """Traduz falas já lidas de uma página importada, (índice da região, texto), com o motor atual, e grava no banco.
+
+        Só o tradutor offline usa a GPU; uma chamada de API não segura a vez do atalho."""
+        if config.current_work != self._work:
+            self._work = config.current_work
+            self._context.clear()
+        with self._background() if config.engine == "local" else nullcontext():
+            if config.engine == "local":
+                self._prepare(config, status)
+            new = self._call_translator(image, regions, pending, config, status)
+        text_of = dict(pending)
+        if self._db is not None:
+            self._db.save_translations(self._db_key(config), [(text_of[i], r.translation) for i, r in new.items()])
+        self._context.extend(text_of[i] for i in sorted(new))
+        return {i: r.translation for i, r in new.items() if r.translation}
 
     def translate_offline(self, lines: list[Line], config: Config) -> list[Result]:
         """NLLB na GPU para a tradução em lote (em segundo plano: cede a vez ao atalho)."""
