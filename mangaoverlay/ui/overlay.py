@@ -1,5 +1,7 @@
 """Janela transparente sobre um monitor: mostra as traduções e deixa os cliques passarem para o que está embaixo."""
 
+import sys
+
 from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QScreen
 from PySide6.QtWidgets import QWidget
@@ -30,6 +32,8 @@ class OverlayWindow(QWidget):
         self._busy = False
         self.setScreen(screen)
         self.setGeometry(screen.geometry())
+        if sys.platform == "win32":
+            _exclude_from_capture(int(self.winId()))
 
     def show_result(self, result: ScreenResult, image_size: tuple[int, int], font: QFont) -> None:
         self._items = result.items
@@ -75,3 +79,15 @@ class OverlayWindow(QWidget):
                 painter.drawImage(*self._color)  # a página colorida, por baixo das traduções
             paint_items(painter, self._items, self._font)
         painter.end()
+
+
+def _exclude_from_capture(hwnd: int) -> None:
+    """Windows 10 2004 ou mais novo: a sobreposição não aparece nas capturas de tela (nem nas do próprio app), então o
+    modo em tempo real enxerga a página por baixo dela. Em versões antigas a chamada falha e nada muda."""
+    import ctypes
+
+    WDA_EXCLUDEFROMCAPTURE = 0x11
+    try:
+        ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+    except (AttributeError, OSError):
+        pass

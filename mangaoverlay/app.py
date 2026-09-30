@@ -21,8 +21,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot, transfer
-from .config import ENGINES, Config
+from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, realtime, screencast, screenshot, transfer
+from .config import CONFIG_DIR, ENGINES, Config
 from .batch import BatchRunner, batch_key
 from .db import Database
 from .importer import Importer
@@ -108,6 +108,8 @@ class MangaOverlayApp(QObject):
         # Pedido da tela em andamento: o número descarta resultados de pedidos cancelados; o evento avisa o pipeline
         self._request = 0
         self._cancel: threading.Event | None = None
+        self._auto = False  # o pedido atual veio do modo em tempo real (sem avisos de "nada encontrado")
+        self._realtime: realtime.RealtimeWatcher | None = None
         self._settings_open = False
 
         self.importer = Importer(self.db, self.pipeline, self)
@@ -139,6 +141,7 @@ class MangaOverlayApp(QObject):
         self._apply_hotkeys()
 
         self._warm_up()
+        self._apply_realtime()
         self._resume_import(silent=True)
         self._resume_batches(silent=True)
 
@@ -160,12 +163,15 @@ class MangaOverlayApp(QObject):
 
         self._translate_action = menu.addAction("", self.translate_screen)
         self._colorize_action = menu.addAction("", self.colorize_screen)
-        self._hide_action = menu.addAction("", self.hide_translation)
+        self._hide_action = menu.addAction("", self._hide_by_user)
         self._cancel_action = menu.addAction("Cancelar a tradução", self.cancel_translation)
         self._cancel_action.setVisible(False)
         self._colorize_toggle = menu.addAction("Colorir junto com a tradução")
         self._colorize_toggle.setCheckable(True)
         self._colorize_toggle.toggled.connect(lambda on: on != self.config.colorize and self._update_config(colorize=on))
+        self._realtime_toggle = menu.addAction("Tempo real (traduz sozinho quando a página muda)")
+        self._realtime_toggle.setCheckable(True)
+        self._realtime_toggle.toggled.connect(lambda on: on != self.config.realtime and self._update_config(realtime=on))
         self._saved_only_toggle = menu.addAction("Só traduções salvas (nunca traduzir de novo)")
         self._saved_only_toggle.setCheckable(True)
         self._saved_only_toggle.toggled.connect(lambda on: on != self.config.saved_only and self._update_config(saved_only=on))
@@ -222,6 +228,7 @@ class MangaOverlayApp(QObject):
         self._colorize_action.setText(f"Colorir a tela{hint(c.hotkey_colorize)}")
         self._hide_action.setText(f"Esconder{hint(c.hotkey_hide)}")
         self._colorize_toggle.setChecked(c.colorize)
+        self._realtime_toggle.setChecked(c.realtime)
         self._saved_only_toggle.setChecked(c.saved_only)
         work = self.db.work(c.current_work)
         self._work_menu.setTitle(f"Obra: {work.name if work else 'nenhuma'}")
@@ -624,6 +631,7 @@ class MangaOverlayApp(QObject):
         self.config.save()
         self._refresh_menu()
         self._warm_up()
+        self._apply_realtime()
 
     def _apply_hotkeys(self) -> None:
         warning = self.hotkeys.apply(self.config.hotkeys)
@@ -660,6 +668,7 @@ class MangaOverlayApp(QObject):
         self.config.save()
         self._refresh_menu()
         self._warm_up()
+        self._apply_realtime()
         if hotkeys_changed:
             self._apply_hotkeys()
 
@@ -689,7 +698,7 @@ class MangaOverlayApp(QObject):
     def _on_hotkey(self, action: str) -> None:
         if action == "hide":
             # Durante uma tradução, o atalho de esconder cancela o pedido
-            self.cancel_translation() if self._busy else self.hide_translation()
+            self.cancel_translation() if self._busy else self._hide_by_user()
         elif action == "translate":
             self.translate_screen()
         elif action == "colorize":
@@ -719,10 +728,13 @@ class MangaOverlayApp(QObject):
         """Só colore; mantém a tradução se ela já estava ligada junto."""
         self._start(translate=self.config.colorize, colorize=True)
 
-    def _start(self, translate: bool, colorize: bool) -> None:
+    def _start(self, translate: bool, colorize: bool, auto: bool = False) -> None:
         if self._busy:
             return
         self._busy = True
+        self._auto = auto
+        if self._realtime is not None:
+            self._realtime.detector.busy()
         self._request += 1
         self._cancel = threading.Event()
         self._set_busy_tooltip(True)
@@ -746,6 +758,7 @@ class MangaOverlayApp(QObject):
         self._busy = False
         self._set_busy_tooltip(False)
         self.hide_translation()
+        self._rearm_realtime()
         _log("Tradução da tela cancelada")
         self._notify("Tradução cancelada.", 2500)
 
@@ -806,6 +819,9 @@ class MangaOverlayApp(QObject):
                 texts += len(result.items)
                 pages += result.color_image is not None
         _log(f"Tela processada: {texts} texto(s), {pages} página(s) colorida(s)")
+        self._rearm_realtime()
+        if self._auto:
+            return  # no tempo real, "nada encontrado" a cada tela sem mangá seria só barulho
         if translate and self.config.saved_only:
             found = sum(1 for _r, (result, _s) in results.items() for i in result.items if not i.missing)
             lacking = sum(1 for _r, (result, _s) in results.items() for i in result.items if i.missing)
@@ -823,13 +839,73 @@ class MangaOverlayApp(QObject):
         self._set_busy_tooltip(False)
         self.hide_translation()
         _log(f"Falha ao processar a tela: {exc.__class__.__name__}: {exc}")
+        self._rearm_realtime()
         if isinstance(exc, screenshot.CaptureCancelled):
             return
         self._notify(str(exc) or exc.__class__.__name__, 12000, warning=True)
 
+    # --- tempo real -------------------------------------------------------------
+
+    def _apply_realtime(self) -> None:
+        """Liga ou desliga a observação da tela conforme a configuração."""
+        if self.config.realtime and self._realtime is None:
+            self._start_realtime()
+        elif not self.config.realtime and self._realtime is not None:
+            self._realtime.stop()
+            self._realtime = None
+
+    def _start_realtime(self) -> None:
+        if is_wayland():
+            if not screencast.available():
+                self._realtime_off(screencast.MISSING_GSTREAMER)
+                return
+            source = screencast.ScreenCastSource(CONFIG_DIR / "screencast-token")
+            watcher = realtime.RealtimeWatcher(source.latest, self, stop_source=source.stop)
+        else:
+            watcher = realtime.RealtimeWatcher(realtime.grab_qt_thumbnails, self)
+        watcher.changed.connect(self._on_page_changed)
+        watcher.settled.connect(self._on_page_settled)
+        watcher.failed.connect(self._realtime_off)
+        self._realtime = watcher
+        watcher.start()
+        _log("Tempo real ligado")
+        self._start(translate=True, colorize=self.config.colorize, auto=True)  # traduz o que já está na tela
+
+    def _on_page_changed(self) -> None:
+        self.hide_translation()  # a tradução antiga ficaria fora do lugar durante a rolagem ou na página nova
+
+    def _on_page_settled(self) -> None:
+        if self._busy:
+            self._rearm_realtime()
+            return
+        self._start(translate=True, colorize=self.config.colorize, auto=True)
+
+    def _rearm_realtime(self) -> None:
+        """Depois de mostrar (ou esconder) a tradução, a tela atual vira a referência. Espera a sobreposição aparecer
+        na captura, para ela mesma não contar como mudança de página."""
+        if self._realtime is not None:
+            QTimer.singleShot(1200, lambda: self._realtime is not None and not self._busy and self._realtime.detector.rearm())
+
+    def _realtime_off(self, message: str) -> None:
+        if self._realtime is not None:
+            self._realtime.stop()
+            self._realtime = None
+        _log(f"Tempo real desligado: {message}")
+        if self.config.realtime:
+            self.config = replace(self.config, realtime=False)
+            self.config.save()
+            self._refresh_menu()
+        self._notify(message, 12000, warning=True)
+
+    def _hide_by_user(self) -> None:
+        self.hide_translation()
+        self._rearm_realtime()  # continua escondida até a página mudar
+
     # --- encerramento ---------------------------------------------------------
 
     def quit(self) -> None:
+        if self._realtime is not None:
+            self._realtime.stop()
         self._batch_poll.stop()  # o banco vai ser fechado; a conferência da Batch API não pode disparar depois
         self.hotkeys.stop()
         self._ipc.close()

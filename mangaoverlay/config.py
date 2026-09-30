@@ -47,6 +47,8 @@ class Config:
     font_family: str = ""
     # Mostra a página colorida junto com a tradução (o atalho de colorir funciona sempre)
     colorize: bool = False
+    # Tempo real: observa a tela e traduz (e colore, se `colorize`) sozinho quando a página muda
+    realtime: bool = False
     hotkey_translate: str = "Ctrl+Alt+M"
     hotkey_colorize: str = "Ctrl+Alt+C"
     hotkey_hide: str = "Ctrl+Alt+N"
