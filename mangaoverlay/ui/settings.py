@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -23,6 +24,7 @@ from .. import APP_DISPLAY_NAME, credentials
 from ..config import CLAUDE_MODELS, ENGINES, OPENAI_MODELS, Config
 from ..languages import AUTO, SOURCES, TARGETS, source_name, target_name
 from ..platform_info import is_gnome, is_wayland
+from ..render import COMIC_FONT, register_fonts
 
 
 def _combo(items: list[tuple[str, str]], current: str) -> QComboBox:
@@ -97,14 +99,19 @@ class SettingsDialog(QDialog):
         self._claude_box.setLayout(claude_form)
 
         # Aparência e atalhos
+        register_fonts()  # a fonte de quadrinhos incluída aparece na lista
         self.font_family = QFontComboBox()
         self.font_family.setCurrentFont(QFont(config.font_family) if config.font_family else self.font())
         self.default_font = QCheckBox("Fonte padrão do sistema")
         self.default_font.setChecked(not config.font_family)
         self.default_font.toggled.connect(lambda on: self.font_family.setEnabled(not on))
         self.font_family.setEnabled(bool(config.font_family))
+        comic = QPushButton(f"Usar {COMIC_FONT}")
+        comic.setToolTip("Fonte de quadrinhos incluída no app (licença livre), boa para os balões e os capítulos gerados")
+        comic.clicked.connect(self._use_comic_font)
         font_row = QHBoxLayout()
         font_row.addWidget(self.font_family, 1)
+        font_row.addWidget(comic)
         font_row.addWidget(self.default_font)
 
         self.colorize = QCheckBox("Colorir a página junto com a tradução")
@@ -147,6 +154,10 @@ class SettingsDialog(QDialog):
 
         self.engine.currentIndexChanged.connect(self._update_enabled)
         self._update_enabled()
+
+    def _use_comic_font(self) -> None:
+        self.default_font.setChecked(False)
+        self.font_family.setCurrentFont(QFont(COMIC_FONT))
 
     def _update_enabled(self) -> None:
         engine = str(self.engine.currentData())

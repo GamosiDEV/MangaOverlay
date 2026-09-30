@@ -128,10 +128,13 @@ Decidida em 30/09/2026. A ideia: traduzir no PC e ler no celular, num leitor com
 
 ### Fase 10: Qualidade do texto nas imagens geradas
 
-- [ ] Opção de fonte de quadrinhos nas Configurações.
-- [ ] Área de escrita que acompanha a forma do balão (elipse) em vez do retângulo do texto, e hifenização (balões japoneses altos e estreitos).
-- [ ] Caixas retangulares de narração e placas: cobertura retangular. Hoje a cobertura é recortada em elipse (pensada para balões redondos) e sobram pedaços de letras nos cantos; no arquivo gerado isso aparece mais que na tela. O mesmo vale para o fundo cinza que às vezes cobre onomatopeias em quadros.
-- [ ] Guardar o balão de cada fala no banco já na importação, para a geração não precisar rodar o detector de novo.
+- [x] Fonte de quadrinhos incluída no app (Comic Neue, SIL Open Font License, em `assets/fonts`), com o botão "Usar Comic Neue" nas Configurações. O padrão continua sendo a fonte do sistema.
+- [x] Texto que acompanha a forma do balão: num balão redondo, cada linha tem a largura da elipse naquela altura; só é usado se a letra ficar pelo menos do tamanho do jeito antigo (balões cheios de texto às vezes rendem menos na elipse).
+- [x] Hifenização com o pyphen (pt, en, es, fr, de, it), só em palavras que não cabem inteiras nem numa linha vazia e só se a fonte ficar 15% maior; pelo menos 2 letras antes e 3 depois do hífen; palavras com hífen não são quebradas de novo. Sinais soltos ("-", "!", "...") ficam grudados na palavra vizinha.
+- [x] Caixas retangulares de narração e placas (contorno reto até perto dos cantos, papel logo por dentro): a caixa inteira é coberta, com a cor do papel medida junto do contorno, e o texto usa a caixa toda. Acabou com os pedaços de letras nos cantos e com o fundo cinza nas onomatopeias em caixas.
+- [x] Balão e área de escrita de cada fala guardados no banco na importação (migração 7, coluna `regioes.forma`); a geração só roda o detector nas falas importadas antes disto. Vão junto na exportação, numa chave à parte que versões anteriores ignoram.
+
+**Pronto quando:** as páginas de teste (Monster vol. 9, caixas de narração; Dorohedoro vol. 1, balões redondos) saem sem restos do texto original e com letra igual ou maior que antes. ✅ Verificado nas duas, na geração e no desenho do overlay (`--image`). Continua igual: texto fora de balão (narração solta sobre o desenho) é coberto por um retângulo, o que a Fase 11 resolveria.
 
 ### Fase 11 (opcional): Inpainting
 

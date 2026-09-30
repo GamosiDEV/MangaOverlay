@@ -240,6 +240,8 @@ O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: O
 - **Páginas não lidas** (importação pendente ou com erro) entram como no original. Se o arquivo original do capítulo foi movido, o capítulo é pulado com um aviso.
 - Parar no meio não deixa arquivo pela metade: os capítulos prontos ficam e o que estava em andamento não é gravado. Gerar de novo na mesma pasta substitui a versão anterior (com confirmação).
 
+Para o texto ficar com cara de quadrinho, use a fonte **Comic Neue** (incluída no app, licença livre): botão "Usar Comic Neue" em Configurações. Ela vale também para o overlay.
+
 Os arquivos originais nunca são alterados. As imagens geradas são para a sua leitura; compartilhá-las é responsabilidade de quem as gera.
 
 Pela linha de comando: `mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes]`.
@@ -360,7 +362,7 @@ Com o app aberto, `--translate`, `--colorize` e `--hide` só avisam a instância
 2. **Detecção:** o modelo [comic-text-and-bubble-detector](https://huggingface.co/ogkalu/comic-text-and-bubble-detector) (RT-DETR-v2, Apache-2.0) encontra balões e textos. Só vale o texto dentro de um balão com alta confiança, para não traduzir menus e botões.
 3. **Leitura (OCR):** [manga-ocr](https://huggingface.co/kha-white/manga-ocr-base) para japonês, que lê texto vertical; EasyOCR para coreano, chinês e inglês.
 4. **Tradução:** primeiro o app procura no banco local uma tradução já feita para o mesmo texto; só o que falta vai para o motor escolhido. A busca é pelo texto lido, então a página é reconhecida mesmo com outro zoom ou em outra posição da tela.
-5. **Desenho:** cobre o texto original sem apagar o contorno do balão e encaixa a tradução no maior tamanho de fonte que couber.
+5. **Desenho:** cobre o texto original sem apagar o contorno do balão e encaixa a tradução no maior tamanho de fonte que couber. Num balão redondo, cada linha acompanha a largura do balão naquela altura; caixas retangulares de narração são cobertas por inteiro, com a cor do papel. Palavras longas demais para a linha são hifenizadas ([pyphen](https://github.com/Kozea/Pyphen)).
 
 Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s numa RTX 5050 com o tradutor offline.
 
@@ -381,4 +383,4 @@ Com os modelos carregados, uma tela 2560×1600 leva cerca de 0,2 s numa RTX 5050
 
 ## Licença
 
-[MIT](LICENSE). Os modelos têm licenças próprias: o NLLB é CC-BY-NC 4.0 (uso não comercial) e o colorizador não declara licença no repositório original.
+[MIT](LICENSE). A fonte Comic Neue (`assets/fonts`) é distribuída sob a SIL Open Font License 1.1. Os modelos têm licenças próprias: o NLLB é CC-BY-NC 4.0 (uso não comercial) e o colorizador não declara licença no repositório original.
