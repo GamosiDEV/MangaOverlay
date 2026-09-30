@@ -78,12 +78,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--traduzir-faltantes", action="store_true", help="com --gerar: traduz com o motor atual as falas que ainda não têm tradução"
     )
+    parser.add_argument(
+        "--reconstruir", action="store_true", help="com --gerar: reconstrói o desenho por baixo do texto fora dos balões (IA local)"
+    )
     args = parser.parse_args(argv)
 
     if args.gerar:
         from .generate import run_cli as generate_cli
 
-        return generate_cli(args.gerar, args.obra, args.capitulo, args.formato, args.traduzir_faltantes)
+        return generate_cli(args.gerar, args.obra, args.capitulo, args.formato, args.traduzir_faltantes, args.reconstruir)
 
     if args.export or args.import_file:
         from .transfer import run_cli

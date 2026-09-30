@@ -478,10 +478,11 @@ class MangaOverlayApp(QObject):
         if dialog.exec() != GenerateDialog.DialogCode.Accepted:
             return
         folder = dialog.target_folder()
-        if dialog.fmt != self.config.generate_format or str(folder) != self.config.generate_dir:
-            self._update_config(generate_format=dialog.fmt, generate_dir=str(folder))
+        inpaint = dialog.inpaint.isChecked()
+        if (dialog.fmt, str(folder), inpaint) != (self.config.generate_format, self.config.generate_dir, self.config.generate_inpaint):
+            self._update_config(generate_format=dialog.fmt, generate_dir=str(folder), generate_inpaint=inpaint)
         chapters = dialog.selected_chapters()
-        if self.generator.start(self.config, work, chapters, folder, dialog.fmt, dialog.translate_missing):
+        if self.generator.start(self.config, work, chapters, folder, dialog.fmt, dialog.translate_missing, inpaint):
             self._generate_window.start(len(chapters), folder)
 
     def _on_generate_finished(self, summary) -> None:

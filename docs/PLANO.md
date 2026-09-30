@@ -136,9 +136,15 @@ Decidida em 30/09/2026. A ideia: traduzir no PC e ler no celular, num leitor com
 
 **Pronto quando:** as páginas de teste (Monster vol. 9, caixas de narração; Dorohedoro vol. 1, balões redondos) saem sem restos do texto original e com letra igual ou maior que antes. ✅ Verificado nas duas, na geração e no desenho do overlay (`--image`). Continua igual: texto fora de balão (narração solta sobre o desenho) é coberto por um retângulo, o que a Fase 11 resolveria.
 
-### Fase 11 (opcional): Inpainting
+### Fase 11: Reconstruir o desenho por baixo do texto (inpainting)
 
-- [ ] Reconstruir o desenho por baixo de textos fora dos balões (narração, placas) com o LaMa, baixado só quando o recurso for usado.
+- [x] Modelo LaMa (Apache-2.0), na exportação ONNX de `Carve/LaMa-ONNX` (Apache-2.0, ~200 MB), convertido para PyTorch como o colorizador; baixado no primeiro uso (e pelo instalador, com os outros modelos). ~0,3 s por texto na RTX 5050.
+- [x] Opção "Reconstruir o desenho por baixo do texto fora dos balões" na janela de gerar capítulos (lembrada) e `--reconstruir` na linha de comando. Desligada por padrão.
+- [x] Só o texto sobre o desenho é reconstruído: borda em volta que não é papel liso **e** muitos meios-tons dentro da caixa (medido em 1.887 falas de dois volumes: texto em papel fica em 0,05–0,13; sobre desenho, ~0,19–0,25). "Não ter balão" não serve de critério: com o limiar baixo dos arquivos, o detector vê balões em volta de onomatopeias.
+- [x] O texto reconstruído recebe a tradução no lugar do original, sem cobertura, com o contorno de legibilidade dos textos soltos.
+- [x] De quebra: falas marcadas duas vezes pelo detector são desenhadas uma vez só (sem cobertura, as duas traduções apareciam uma sobre a outra), e a cobertura de texto numa mancha branca sobre o desenho usa a cor do papel dentro da caixa, e não a mediana cinza da borda (acabou com os retângulos cinza, também sem a reconstrução e no overlay).
+
+**Pronto quando:** texto de narração sobre o desenho sai sem retângulo, com o desenho refeito por baixo. ✅ Verificado no Berserk vol. 11 (tijolos e retícula reconstruídos); o volume inteiro (248 páginas) levou 42 s com a opção, contra 31 s sem.
 
 ## Custos de referência (gpt-4.1-mini)
 

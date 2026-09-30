@@ -13,6 +13,7 @@ from collections.abc import Callable
 def _steps() -> list[tuple[str, Callable[[], object]]]:
     from .colorize import Colorizer
     from .detector import Detector
+    from .inpaint import Inpainter
     from .ocr import _EASYOCR_LANGS, OcrEngine
     from .translators import NllbTranslator
 
@@ -24,6 +25,7 @@ def _steps() -> list[tuple[str, Callable[[], object]]]:
     steps += [
         ("tradutor offline (NLLB)", lambda: NllbTranslator("cpu")),
         ("colorizador", lambda: Colorizer("cpu")),
+        ("reconstrução do desenho (LaMa)", lambda: Inpainter("cpu")),
     ]
     return steps
 
@@ -54,10 +56,11 @@ def delete_all() -> None:
 
     from .colorize import MODEL_REPO
     from .detector import MODEL_ID
+    from .inpaint import MODEL_REPO as LAMA_REPO
     from .ocr import MANGA_OCR_ID
     from .translators import NLLB_ID
 
-    repos = {MODEL_ID, MANGA_OCR_ID, NLLB_ID, MODEL_REPO}
+    repos = {MODEL_ID, MANGA_OCR_ID, NLLB_ID, MODEL_REPO, LAMA_REPO}
     try:
         cache = scan_cache_dir()
     except CacheNotFound:  # nenhum modelo baixado

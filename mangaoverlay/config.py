@@ -66,6 +66,8 @@ class Config:
     # Capítulos traduzidos em imagem: último formato ("cbz" ou "pasta") e última pasta de destino escolhidos
     generate_format: str = "cbz"
     generate_dir: str = ""
+    # Reconstruir o desenho por baixo do texto fora dos balões nos capítulos gerados (LaMa, ~200 MB)
+    generate_inpaint: bool = False
     # Usa a GPU (CUDA) para os modelos locais, se houver
     use_gpu: bool = True
 

@@ -266,9 +266,10 @@ def paint_items(painter: QPainter, items: list[OverlayItem], font: QFont) -> Non
                 region = bubble.adjusted(*(v * side * 0.09 for v in (1, 1, -1, -1)))
             if not plausible:
                 region = None
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawPath(cover)
+        if item.cover:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawPath(cover)
 
         layout = None
         if region is not None and region.width() > 4 and region.height() > 4:

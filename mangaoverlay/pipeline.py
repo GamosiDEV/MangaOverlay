@@ -48,6 +48,7 @@ class OverlayItem:
     missing: bool = False  # modo "só traduções salvas": fala sem tradução no banco (original fica visível, marcado)
     shape: str = "ellipse"  # forma do balão: "ellipse" ou "rect" (caixa de narração); ver bubble_shape
     language: str = ""  # idioma da tradução (hifenização)
+    cover: bool = True  # False: o texto original já foi apagado (desenho reconstruído); só escreve por cima
 
 
 def _dhash(image: Image.Image) -> int:
@@ -70,6 +71,61 @@ def _background(image: np.ndarray, box: Box) -> tuple[int, int, int]:
         return 255, 255, 255
     border = np.concatenate([patch[0], patch[-1], patch[:, 0], patch[:, -1]])
     return tuple(int(v) for v in np.median(border, axis=0))
+
+
+def on_paper(frame: np.ndarray, fill: Box) -> bool:
+    """O texto está sobre papel liso (a borda em volta dele é quase toda da mesma cor), e não sobre o desenho."""
+    x0, y0, x1, y1 = fill
+    patch = frame[y0:y1, x0:x1].astype(np.int16)
+    if patch.shape[0] < 3 or patch.shape[1] < 3:
+        return True
+    border = np.concatenate([patch[0], patch[-1], patch[:, 0], patch[:, -1]])
+    median = np.median(border, axis=0)
+    return float((np.abs(border - median).max(axis=1) < 30).mean()) >= 0.85
+
+
+def text_background(frame: np.ndarray, text_box: Box, fill: Box) -> tuple[int, int, int]:
+    """Cor para cobrir o texto. Normalmente a da borda em volta dele (papel do balão). Se a borda não for lisa (texto numa
+    mancha branca sobre o desenho, caixa encostando no contorno), a mediana cinza dela vira um retângulo cinza: aí vale o
+    papel dentro da própria caixa, a parte clara entre as letras."""
+    if on_paper(frame, fill):
+        return _background(frame, fill)
+    x0, y0, x1, y1 = text_box
+    patch = frame[y0:y1, x0:x1].reshape(-1, 3)
+    if len(patch) == 0:
+        return _background(frame, fill)
+    bright = patch[patch.mean(axis=1) > 170]
+    if len(bright) < 0.4 * len(patch):  # a caixa não é "papel com letras" (texto claro em fundo escuro, desenho)
+        return _background(frame, fill)
+    return tuple(int(v) for v in np.median(bright, axis=0))
+
+
+def same_place(a: Box, b: Box) -> bool:
+    """Duas caixas quase iguais (o detector às vezes marca a mesma fala duas vezes): mais de 60% de sobreposição."""
+    w = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    h = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = w * h
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return union > 0 and inter / union > 0.6
+
+
+# Fração de meios-tons dentro da caixa do texto a partir da qual o texto está sobre o desenho. Medido em dois volumes
+# (1.887 falas): texto em papel fica em 0,05–0,13 (95% abaixo de 0,15; só tinta, papel e a suavização das letras);
+# texto sobre desenho ou retícula, perto de 0,19–0,25.
+_OVER_ART_MIDTONES = 0.16
+
+
+def over_art(frame: np.ndarray, text_box: Box, fill: Box) -> bool:
+    """O texto está sobre o desenho: a borda em volta não é papel liso e, dentro da caixa, há muitos meios-tons (não só
+    tinta e papel). As duas coisas: a borda sozinha engana quando a caixa do texto encosta no contorno do balão."""
+    if on_paper(frame, fill):
+        return False
+    x0, y0, x1, y1 = text_box
+    gray = frame[y0:y1, x0:x1].astype(np.float32).mean(axis=2)
+    if gray.size == 0:
+        return False
+    paper = float(np.mean(_background(frame, fill)))
+    return float(((gray > 70) & (gray < paper - 45)).mean()) >= _OVER_ART_MIDTONES
 
 
 def box_paper(frame: np.ndarray, bubble: Box) -> tuple[int, int, int]:
@@ -227,6 +283,7 @@ class Pipeline:
         self._ocr: OcrEngine | None = None
         self._nllb: translators.NllbTranslator | None = None
         self._colorizer: Colorizer | None = None
+        self._inpainter = None  # inpaint.Inpainter, carregado no primeiro uso
         self._cache = _Cache()
         # Falas das últimas telas: dão contexto de cena para os LLMs
         self._context: deque[str] = deque(maxlen=30)
@@ -252,7 +309,7 @@ class Pipeline:
         device = "cuda" if config.use_gpu and torch.cuda.is_available() else "cpu"
         if device != self._device:
             self._device = device
-            self._detector = self._ocr = self._nllb = self._colorizer = None
+            self._detector = self._ocr = self._nllb = self._colorizer = self._inpainter = None
         if self._detector is None:
             status("Carregando o detector de balões (na primeira vez ele é baixado)…")
             self._detector = Detector(device)
@@ -452,7 +509,9 @@ class Pipeline:
             if translation.casefold() == text.casefold():
                 continue  # "não precisa traduzir" (reticências, onomatopeias)
             extra.append(
-                OverlayItem(fill, _expand(box, image.size), translation, text, _background(frame, fill), None, language=config.target_lang)
+                OverlayItem(
+                    fill, _expand(box, image.size), translation, text, text_background(frame, box, fill), None, language=config.target_lang
+                )
             )
         return extra
 
@@ -512,7 +571,7 @@ class Pipeline:
             if result is None or not result.translation or result.translation.casefold() == result.original.casefold():
                 continue
             fill = _expand(region.text_box, image.size)
-            background = _background(frame, fill)
+            background = text_background(frame, region.text_box, fill)
             shape = bubble_shape(frame, region.bubble, background) if region.bubble else "ellipse"
             items.append(
                 OverlayItem(
@@ -671,6 +730,16 @@ class Pipeline:
             match = max(candidates, key=lambda r: shared(r.text_box, box), default=None)
             regions.append(Region(box, match.area, match.bubble) if match else Region(box, box, None))
         return regions
+
+    def erase_text(self, image: Image.Image, boxes: list[Box], config: Config) -> Image.Image:
+        """A página com o desenho reconstruído no lugar dos textos (capítulos gerados; ver inpaint.py)."""
+        from .inpaint import Inpainter
+
+        with self._background():
+            self._prepare(config, lambda _msg: None)
+            if self._inpainter is None:
+                self._inpainter = Inpainter(self._device)
+            return self._inpainter.erase(image, boxes)
 
     def translate_stored(
         self,
