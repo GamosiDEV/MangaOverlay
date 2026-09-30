@@ -112,17 +112,6 @@ def _fit_transform(pairs: list[tuple[tuple[float, float], Box]], size: tuple[int
     return scale, dx, dy
 
 
-def _looks_misread(source: str, detected: int, texts: list[str]) -> bool:
-    """Sinais de que o idioma de origem está errado: o leitor leu poucas das falas detectadas, ou, em japonês, as falas
-    lidas quase não têm kana (chinês lido como japonês: o leitor de mangá lê os ideogramas, mas não há kana)."""
-    if detected >= 3 and len(texts) <= detected // 3:
-        return True
-    if source == "ja" and len(texts) >= 2:
-        without_kana = sum(1 for t in texts if langdetect.script_of(t) == "zh")
-        return without_kana / len(texts) >= 0.7
-    return False
-
-
 def _single_transform(fill: Box, file_box: Box, length: int) -> tuple[float, float, float] | None:
     """Escala e deslocamento a partir de uma fala só: a caixa dela na tela (com a folga de _expand) contra a caixa no
     arquivo. Só para falas longas (identificam bem a página) e se a escala na horizontal e na vertical concordarem."""
@@ -513,7 +502,7 @@ class Pipeline:
 
         status("Lendo os textos…")
         readable = self._read(crops, indices, source)
-        self._suspect_language = self._suspect_language or _looks_misread(source, len(indices), [t for _i, t in readable])
+        self._suspect_language = self._suspect_language or langdetect.looks_misread(source, len(indices), [t for _i, t in readable])
         if not readable:
             return {}
         self._check()

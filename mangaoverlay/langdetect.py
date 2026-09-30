@@ -39,6 +39,17 @@ def script_of(text: str) -> str | None:
     return None
 
 
+def looks_misread(source: str, detected: int, texts: list[str]) -> bool:
+    """Sinais de que o idioma de origem está errado: o leitor leu poucas das falas detectadas, ou, em japonês, as falas
+    lidas quase não têm kana (chinês lido como japonês: o leitor de mangá lê os ideogramas, mas não há kana)."""
+    if detected >= 3 and len(texts) <= detected // 3:
+        return True
+    if source == "ja" and len(texts) >= 2:
+        without_kana = sum(1 for t in texts if script_of(t) == "zh")
+        return without_kana / len(texts) >= 0.7
+    return False
+
+
 def chinese_variant(confidences: list[tuple[float, float]]) -> str | None:
     """"zh-CN", "zh-TW" ou None, pelas confianças (simplificado, tradicional) de cada fala em chinês. Só contam as
     falas que os dois leitores leram: a que um deles não lê (fonte estilizada) não diz nada sobre a forma."""

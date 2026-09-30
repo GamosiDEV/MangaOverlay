@@ -1,7 +1,6 @@
 """Detectar o idioma de origem pela escrita das falas (python -m pytest tests)."""
 
-from mangaoverlay.langdetect import chinese_variant, decide, script_of
-from mangaoverlay.pipeline import _looks_misread
+from mangaoverlay.langdetect import chinese_variant, decide, looks_misread, script_of
 
 
 def test_escrita_de_cada_fala():
@@ -35,8 +34,8 @@ def test_chines_simplificado_ou_tradicional():
 
 def test_sinais_de_origem_errada():
     # Chinês lido como japonês: ideogramas sem kana
-    assert _looks_misread("ja", 2, ["有烦恼随时告诉我", "这个老师会帮你"])
-    assert not _looks_misread("ja", 4, ["お前は誰だ", "ここはどこなの", "早く逃げて", "ありがとう"])
+    assert looks_misread("ja", 2, ["有烦恼随时告诉我", "这个老师会帮你"])
+    assert not looks_misread("ja", 4, ["お前は誰だ", "ここはどこなの", "早く逃げて", "ありがとう"])
     # O leitor do idioma leu poucas das falas detectadas
-    assert _looks_misread("ko", 6, ["여기서"])
-    assert not _looks_misread("ko", 6, ["여기서", "빨리 가자", "고마워", "어려워"])
+    assert looks_misread("ko", 6, ["여기서"])
+    assert not looks_misread("ko", 6, ["여기서", "빨리 가자", "고마워", "어려워"])
