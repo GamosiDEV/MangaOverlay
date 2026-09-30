@@ -21,7 +21,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot
+from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, screenshot, transfer
 from .config import ENGINES, Config
 from .batch import BatchRunner, batch_key
 from .db import Database
@@ -41,6 +41,7 @@ from .ui.works import NewWorkDialog, WorksDialog
 from .ui.importwindow import ImportWindow
 from .ui.overlay import OverlayWindow
 from .ui.settings import SettingsDialog
+from .ui.transferdialog import ExportDialog, preview_text
 
 
 def _log(message: str) -> None:
@@ -173,6 +174,9 @@ class MangaOverlayApp(QObject):
         self._work_menu = menu.addMenu("")
         self._work_menu.aboutToShow.connect(self._fill_work_menu)
         menu.addAction("Obras e capítulos…", self._open_works)
+        transfer_menu = menu.addMenu("Exportar e importar dados")
+        transfer_menu.addAction("Exportar obras e traduções…", self._export_data)
+        transfer_menu.addAction("Importar de um arquivo…", self._import_data)
         self._source_menu = menu.addMenu("")
         self._source_group = self._choice_actions(self._source_menu, [(source_name(c), c) for c in [*SOURCES, AUTO]], "source_lang")
         self._target_menu = menu.addMenu("")
@@ -522,6 +526,60 @@ class MangaOverlayApp(QObject):
         if self.batch_runner.running or self.db.batches(("ativo",)):
             return "Há uma tradução em lote em andamento."
         return None
+
+    def _export_data(self) -> None:
+        dialog = ExportDialog(self.db)
+        dialog.setWindowIcon(app_icon())
+        if dialog.exec() != ExportDialog.DialogCode.Accepted:
+            return
+        suggested = Path.home() / f"MangaOverlay-dados-{datetime.now():%Y-%m-%d}.zip"
+        name, _ = QFileDialog.getSaveFileName(None, "Exportar dados", str(suggested), "Exportação do MangaOverlay (*.zip)")
+        if not name:
+            return
+        path = Path(name) if name.lower().endswith(".zip") else Path(name + ".zip")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            counts = transfer.export_data(self.db, path, dialog.selected_works(), dialog.loose.isChecked())
+        except OSError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(None, APP_DISPLAY_NAME, f"Não foi possível gravar {path}:\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        self._notify(
+            f"Exportado: {counts['obras']} obra(s), {counts['capitulos']} capítulo(s), {counts['traducoes']} tradução(ões) "
+            f"em {path.name}.",
+            6000,
+        )
+
+    def _import_data(self) -> None:
+        name, _ = QFileDialog.getOpenFileName(None, "Importar dados", str(Path.home()), "Exportação do MangaOverlay (*.zip)")
+        if not name:
+            return
+        try:
+            data = transfer.read_data(name)
+        except transfer.TransferError as exc:
+            QMessageBox.warning(None, APP_DISPLAY_NAME, str(exc))
+            return
+        answer = QMessageBox.question(None, APP_DISPLAY_NAME, preview_text(transfer.preview(self.db, data)))
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = transfer.import_data(self.db, data)
+        except Exception as exc:  # sqlite3 e dados malformados: nada foi gravado (a transação foi desfeita)
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(None, APP_DISPLAY_NAME, f"A importação falhou e nada foi alterado:\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        self._refresh_menu()
+        skipped = f" ({result.chapters_skipped} capítulo(s) já existiam)" if result.chapters_skipped else ""
+        QMessageBox.information(
+            None,
+            APP_DISPLAY_NAME,
+            f"Importado: {result.works_created} obra(s) nova(s), {result.works_merged} mesclada(s); "
+            f"{result.chapters} capítulo(s){skipped}, {result.pages} página(s); {result.translations} tradução(ões) nova(s) "
+            f"({result.translations_skipped} já existiam); {result.characters} personagem(ns); {result.terms} termo(s).",
+        )
 
     def _new_work(self) -> None:
         dialog = NewWorkDialog(self.config.source_lang)

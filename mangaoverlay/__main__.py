@@ -62,7 +62,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--color", action="store_true", help="com --image: colore a página também")
     parser.add_argument("--no-translate", action="store_true", help="com --image: não traduz (use com --color)")
     parser.add_argument("--download-models", action="store_true", help="baixa todos os modelos locais agora (o instalador usa)")
+    parser.add_argument("--export", metavar="ARQUIVO", help="exporta obras, capítulos e traduções para um .zip")
+    parser.add_argument("--obra", action="append", metavar="NOME", help="com --export: só esta obra (pode repetir); sem ela, todas")
+    parser.add_argument("--import", dest="import_file", metavar="ARQUIVO", help="importa um .zip exportado (mescla, sem sobrescrever)")
     args = parser.parse_args(argv)
+
+    if args.export or args.import_file:
+        from .transfer import run_cli
+
+        return run_cli(args.export, args.obra, args.import_file)
 
     if args.download_models:
         from .models import download_all
