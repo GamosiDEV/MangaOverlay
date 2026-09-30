@@ -116,3 +116,49 @@ def test_erro_no_meio_desfaz_tudo(tmp_path):
     with pytest.raises(Exception):
         transfer.import_data(target, data)
     assert target.works() == []
+
+
+COMBINATIONS = [
+    parts
+    for size in (1, 2, 3)
+    for parts in __import__("itertools").combinations(transfer.PARTS, size)
+]
+
+
+@pytest.mark.parametrize("parts", COMBINATIONS, ids=["+".join(p) for p in COMBINATIONS])
+def test_cada_combinacao_de_partes(tmp_path, parts):
+    source, work_id = _populated(tmp_path / "origem.db")
+    transfer.export_data(source, tmp_path / "e.zip", [work_id], loose=True, parts=parts)
+    data = transfer.read_data(tmp_path / "e.zip")
+    assert transfer.parts_of(data) == list(parts)
+
+    target = Database(tmp_path / "destino.db")
+    transfer.import_data(target, data)
+    # A obra sempre vem (nome e idioma): páginas e traduções precisam dela
+    work = target.works()[0]
+    assert (work.name, work.source_lang) == ("Obra A", "ja")
+    counts = {
+        "paginas": _rows(target, "SELECT COUNT(*) FROM paginas")[0][0],
+        "regioes": _rows(target, "SELECT COUNT(*) FROM regioes")[0][0],
+        "traducoes": _rows(target, "SELECT COUNT(*) FROM traducoes")[0][0],
+        "personagens": len(target.characters(work.id)),
+        "resumo": target.memory(work.id).summary,
+    }
+    assert (counts["paginas"], counts["regioes"]) == ((3, 4) if "paginas" in parts else (0, 0))
+    assert counts["traducoes"] == (3 if "traducoes" in parts else 0)  # 2 da obra + 1 sem obra
+    assert counts["personagens"] == (2 if "obras" in parts else 0)
+    assert bool(counts["resumo"]) == ("obras" in parts)
+
+
+def test_sem_nenhuma_parte(tmp_path):
+    source, work_id = _populated(tmp_path / "origem.db")
+    with pytest.raises(ValueError):
+        transfer.export_data(source, tmp_path / "e.zip", [work_id], parts=())
+
+
+def test_arquivo_sem_lista_de_partes_tem_todas(tmp_path):
+    source, work_id = _populated(tmp_path / "origem.db")
+    transfer.export_data(source, tmp_path / "e.zip", [work_id])
+    data = transfer.read_data(tmp_path / "e.zip")
+    del data["partes"]
+    assert transfer.parts_of(data) == list(transfer.PARTS)

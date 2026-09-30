@@ -64,13 +64,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--download-models", action="store_true", help="baixa todos os modelos locais agora (o instalador usa)")
     parser.add_argument("--export", metavar="ARQUIVO", help="exporta obras, capítulos e traduções para um .zip")
     parser.add_argument("--obra", action="append", metavar="NOME", help="com --export: só esta obra (pode repetir); sem ela, todas")
+    parser.add_argument(
+        "--partes", metavar="LISTA", help="com --export: quais partes, separadas por vírgula: obras, paginas, traducoes (padrão: todas)"
+    )
     parser.add_argument("--import", dest="import_file", metavar="ARQUIVO", help="importa um .zip exportado (mescla, sem sobrescrever)")
     args = parser.parse_args(argv)
 
     if args.export or args.import_file:
         from .transfer import run_cli
 
-        return run_cli(args.export, args.obra, args.import_file)
+        return run_cli(args.export, args.obra, args.import_file, args.partes)
 
     if args.download_models:
         from .models import download_all

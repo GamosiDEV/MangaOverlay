@@ -539,24 +539,28 @@ class MangaOverlayApp(QObject):
         dialog.setWindowIcon(app_icon())
         if dialog.exec() != ExportDialog.DialogCode.Accepted:
             return
-        suggested = Path.home() / f"MangaOverlay-dados-{datetime.now():%Y-%m-%d}.zip"
+        suggested = Path.home() / f"MangaOverlay-{dialog.file_label()}-{datetime.now():%Y-%m-%d}.zip"
         name, _ = QFileDialog.getSaveFileName(None, "Exportar dados", str(suggested), "Exportação do MangaOverlay (*.zip)")
         if not name:
             return
         path = Path(name) if name.lower().endswith(".zip") else Path(name + ".zip")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            counts = transfer.export_data(self.db, path, dialog.selected_works(), dialog.loose.isChecked())
+            counts = transfer.export_data(
+                self.db, path, dialog.selected_works(), dialog.include_loose(), dialog.selected_parts()
+            )
         except OSError as exc:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(None, APP_DISPLAY_NAME, f"Não foi possível gravar {path}:\n{exc}")
             return
         QApplication.restoreOverrideCursor()
-        self._notify(
-            f"Exportado: {counts['obras']} obra(s), {counts['capitulos']} capítulo(s), {counts['traducoes']} tradução(ões) "
-            f"em {path.name}.",
-            6000,
-        )
+        parts = dialog.selected_parts()
+        summary = [f"{counts['obras']} obra(s)"]
+        if "paginas" in parts:
+            summary.append(f"{counts['capitulos']} capítulo(s), {counts['paginas']} página(s)")
+        if "traducoes" in parts:
+            summary.append(f"{counts['traducoes']} tradução(ões)")
+        self._notify(f"Exportado: {', '.join(summary)} em {path.name}.", 6000)
 
     def _import_data(self) -> None:
         name, _ = QFileDialog.getOpenFileName(None, "Importar dados", str(Path.home()), "Exportação do MangaOverlay (*.zip)")

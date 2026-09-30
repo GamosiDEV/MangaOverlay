@@ -1,9 +1,11 @@
 """Exportar e importar dados: obras, capítulos importados (com o texto lido de cada balão) e traduções.
 
-O arquivo é um .zip com um dados.json versionado. Vai tudo o que pertence às obras escolhidas: capítulos, páginas,
-a posição e o texto de cada balão, traduções (de todos os motores), personagens e memória (resumo e glossário).
-Opcionalmente, as traduções feitas sem obra. Não vão as imagens (o banco só guarda onde elas estão) nem os lotes
-de tradução (estado de execução).
+O arquivo é um .zip com um dados.json versionado, com qualquer combinação de três partes das obras escolhidas:
+- "obras": idioma, personagens e memória (resumo e glossário);
+- "paginas": capítulos importados, páginas, posição e texto de cada balão;
+- "traducoes": traduções salvas, de todos os motores (e, opcionalmente, as feitas sem obra).
+O nome e o idioma de cada obra vão sempre: páginas e traduções precisam de uma obra onde entrar. Não vão as imagens
+(o banco só guarda onde elas estão) nem os lotes de tradução (estado de execução).
 
 A importação mescla sem sobrescrever nada: uma obra com o mesmo nome recebe o que faltar; capítulos já existentes
 (mesma origem), traduções, personagens e termos repetidos são ignorados. Tudo numa transação só.
@@ -21,6 +23,8 @@ from .db import Database
 FORMAT = "mangaoverlay"
 VERSION = 1
 _DATA_FILE = "dados.json"
+PARTS = {"obras": "Obras (idioma, personagens e memória)", "paginas": "Capítulos e páginas (texto lido de cada balão)",
+         "traducoes": "Traduções"}
 _TRANSLATION_FIELDS = ["texto_original", "idioma_origem", "idioma_destino", "motor", "modelo", "traducao", "criada_em"]
 
 
@@ -31,16 +35,23 @@ class TransferError(Exception):
 # --- exportar ------------------------------------------------------------------------------
 
 
-def export_data(db: Database, path: str | Path, work_ids: list[int], loose: bool = False) -> dict[str, int]:
-    """Grava as obras `work_ids` (e, com `loose`, as traduções sem obra) em `path`. Retorna as contagens."""
+def export_data(
+    db: Database, path: str | Path, work_ids: list[int], loose: bool = False, parts: tuple[str, ...] = tuple(PARTS)
+) -> dict[str, int]:
+    """Grava as `parts` (ver PARTS) das obras `work_ids` em `path`; com `loose` e "traducoes", também as traduções
+    sem obra. Retorna as contagens."""
+    parts = tuple(p for p in PARTS if p in parts)
+    if not parts:
+        raise ValueError("Escolha ao menos uma parte para exportar.")
     with db.locked() as conn:
-        works = [_export_work(conn, work_id) for work_id in work_ids]
-        loose_rows = _translations(conn, None) if loose else []
+        works = [_export_work(conn, work_id, parts) for work_id in work_ids]
+        loose_rows = _translations(conn, None) if loose and "traducoes" in parts else []
     data = {
         "formato": FORMAT,
         "versao": VERSION,
         "app": __version__,
         "exportado_em": datetime.now().isoformat(timespec="seconds"),
+        "partes": list(parts),
         "campos_traducao": _TRANSLATION_FIELDS,
         "obras": [w for w in works if w is not None],
         "traducoes_sem_obra": loose_rows,
@@ -54,11 +65,23 @@ def export_data(db: Database, path: str | Path, work_ids: list[int], loose: bool
     return _count(data)
 
 
-def _export_work(conn, work_id: int) -> dict | None:
+def _export_work(conn, work_id: int, parts: tuple[str, ...]) -> dict | None:
     row = conn.execute("SELECT nome, idioma_origem, criada_em FROM obras WHERE id = ?", (work_id,)).fetchone()
     if row is None:
         return None
     name, source_lang, created = row
+    work = {"nome": name, "idioma_origem": source_lang}
+    if "obras" in parts:
+        work["criada_em"] = created
+        work.update(_work_details(conn, work_id))
+    if "paginas" in parts:
+        work["capitulos"] = _chapters(conn, work_id)
+    if "traducoes" in parts:
+        work["traducoes"] = _translations(conn, work_id)
+    return work
+
+
+def _chapters(conn, work_id: int) -> list[dict]:
     chapters = []
     for chapter_id, *chapter in conn.execute(
         """SELECT id, nome, ordem, origem, criado_em, nomes_levantados, resumido FROM capitulos
@@ -78,6 +101,10 @@ def _export_work(conn, work_id: int) -> dict | None:
             "nome": chapter_name, "ordem": order, "origem": origin, "criado_em": chapter_created,
             "nomes_levantados": bool(names_done), "resumido": bool(summarized), "paginas": pages,
         })
+    return chapters
+
+
+def _work_details(conn, work_id: int) -> dict:
     characters = [
         dict(zip(["nome", "nome_original", "genero", "jeito_de_falar", "notas"], r))
         for r in conn.execute(
@@ -93,13 +120,8 @@ def _export_work(conn, work_id: int) -> dict | None:
         ).fetchall()
     ]
     return {
-        "nome": name,
-        "idioma_origem": source_lang,
-        "criada_em": created,
-        "capitulos": chapters,
         "personagens": characters,
         "memoria": {"resumo": memory[0] if memory else "", "atualizada_em": memory[1] if memory else None, "glossario": glossary},
-        "traducoes": _translations(conn, work_id),
     }
 
 
@@ -149,13 +171,18 @@ class WorkPreview:
 @dataclass
 class Preview:
     exported_at: str
+    parts: list[str] = field(default_factory=lambda: list(PARTS))
     works: list[WorkPreview] = field(default_factory=list)
     loose_translations: int = 0
 
 
 def preview(db: Database, data: dict) -> Preview:
     """O que a importação traria: por obra, se ela já existe e quantos capítulos são novos (os outros são pulados)."""
-    result = Preview(exported_at=str(data.get("exportado_em", "")), loose_translations=len(data.get("traducoes_sem_obra", [])))
+    result = Preview(
+        exported_at=str(data.get("exportado_em", "")),
+        parts=parts_of(data),
+        loose_translations=len(data.get("traducoes_sem_obra", [])),
+    )
     with db.locked() as conn:
         for work in data.get("obras", []):
             row = conn.execute("SELECT id FROM obras WHERE nome = ? COLLATE NOCASE", (work["nome"],)).fetchone()
@@ -284,18 +311,23 @@ def _import_translations(conn, work_id: int | None, rows: list[list], result: Im
             result.translations_skipped += 1
 
 
+def parts_of(data: dict) -> list[str]:
+    """Partes presentes no arquivo (sem a lista, o arquivo tem todas)."""
+    return [p for p in data.get("partes", PARTS) if p in PARTS]
+
+
 def _count(data: dict) -> dict[str, int]:
     works = data["obras"]
     return {
         "obras": len(works),
-        "capitulos": sum(len(w["capitulos"]) for w in works),
-        "paginas": sum(len(c["paginas"]) for w in works for c in w["capitulos"]),
-        "traducoes": sum(len(w["traducoes"]) for w in works) + len(data["traducoes_sem_obra"]),
+        "capitulos": sum(len(w.get("capitulos", [])) for w in works),
+        "paginas": sum(len(c["paginas"]) for w in works for c in w.get("capitulos", [])),
+        "traducoes": sum(len(w.get("traducoes", [])) for w in works) + len(data["traducoes_sem_obra"]),
     }
 
 
-def run_cli(export_path: str | None, work_names: list[str] | None, import_path: str | None) -> int:
-    """`--export ARQUIVO [--obra NOME]...` e `--import ARQUIVO`."""
+def run_cli(export_path: str | None, work_names: list[str] | None, import_path: str | None, parts: str | None = None) -> int:
+    """`--export ARQUIVO [--obra NOME]... [--partes obras,paginas,traducoes]` e `--import ARQUIVO`."""
     import sys
 
     db = Database()
@@ -309,8 +341,14 @@ def run_cli(export_path: str | None, work_names: list[str] | None, import_path: 
                     print(f"Obra(s) não encontrada(s): {', '.join(sorted(missing))}", file=sys.stderr)
                     return 2
                 works = [w for w in works if w.name.casefold() in wanted]
-            counts = export_data(db, export_path, [w.id for w in works], loose=not work_names)
-            print(f"Exportado para {export_path}: " + ", ".join(f"{v} {k}" for k, v in counts.items()), file=sys.stderr)
+            chosen = tuple(p.strip() for p in parts.split(",")) if parts else tuple(PARTS)
+            unknown = [p for p in chosen if p not in PARTS]
+            if unknown or not chosen:
+                print(f"Partes desconhecidas: {', '.join(unknown)}. Use: {', '.join(PARTS)}", file=sys.stderr)
+                return 2
+            counts = export_data(db, export_path, [w.id for w in works], loose=not work_names, parts=chosen)
+            shown = {"obras"} | ({"capitulos", "paginas"} if "paginas" in chosen else set()) | ({"traducoes"} if "traducoes" in chosen else set())
+            print(f"Exportado para {export_path}: " + ", ".join(f"{v} {k}" for k, v in counts.items() if k in shown), file=sys.stderr)
         if import_path:
             try:
                 data = read_data(import_path)
