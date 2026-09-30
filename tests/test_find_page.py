@@ -68,3 +68,17 @@ def test_calha_branca_entre_quadros_nao_interrompe():
 
 def test_sem_baloes():
     assert find_page(_screen(background=30), []) is None
+
+
+def test_pagina_encostada_na_barra_de_ferramentas():
+    """Zoom de 100% no Paint: a página encosta na barra, separada só pela linha fina da borda dela (tom 235)."""
+    screen = _screen(background=243)
+    draw = ImageDraw.Draw(screen)
+    draw.rectangle((0, 0, 999, PAGE[1] - 2), fill=(249, 249, 249))  # barra de ferramentas até a página
+    draw.line((0, PAGE[1] - 1, 999, PAGE[1] - 1), fill=(235, 235, 235))  # borda da barra
+    for x in range(40, 900, 90):
+        draw.text((x, PAGE[1] - 20), "Tools", fill=(40, 40, 40))  # rótulos logo acima da borda
+    for i, color in enumerate([(230, 30, 30), (30, 160, 60), (40, 90, 220)]):
+        draw.ellipse((600 + 40 * i, 20, 630 + 40 * i, 50), fill=color)
+    box = find_page(screen, BUBBLES)
+    assert box is not None and abs(box[1] - PAGE[1]) <= 6, box

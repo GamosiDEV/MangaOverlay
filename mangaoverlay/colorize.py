@@ -76,6 +76,18 @@ def _boundary(line: np.ndarray, saturation: np.ndarray, paper: float) -> tuple[b
     return colored, uniform
 
 
+def _ui_separator(probe: list[tuple[np.ndarray, np.ndarray]], paper: float) -> bool:
+    """Borda fina de uma barra de ferramentas colada na página (zoom que enche a janela): uma linha uniforme CLARA de
+    tom diferente do papel, e depois dela nada com o tom do papel. As bordas dos quadros do mangá são escuras e, depois
+    delas, vem a calha (papel), então não param aqui."""
+    line = probe[0][0]
+    mean = float(line.mean())
+    if len(probe) < 2 or float(line.std()) >= 5 or not 180 <= mean < paper - _PAPER_TOLERANCE:
+        return False
+    beyond = np.concatenate([p[0] for p in probe[1:]])
+    return abs(float(beyond.mean()) - paper) > _PAPER_TOLERANCE
+
+
 def _paper(gray: np.ndarray, bubbles: list[Box], scale: int) -> float:
     """Tom do papel: a mediana dos pixels claros dentro dos balões (o texto e o contorno são escuros)."""
     inside = [gray[b[1] // scale : b[3] // scale, b[0] // scale : b[2] // scale].ravel() for b in bubbles]
@@ -93,8 +105,10 @@ def find_page(image: Image.Image, bubbles: list[Box]) -> Box | None:
     """
     if not bubbles:
         return None
-    scale = 2  # trabalha em meia resolução
-    rgb = np.asarray(image.convert("RGB"))[::scale, ::scale].astype(np.int16)
+    scale = 2  # trabalha em meia resolução, pela média de cada bloco 2x2: uma linha de 1 px não some
+    full = np.asarray(image.convert("RGB"), dtype=np.int16)
+    h2, w2 = full.shape[0] // scale * scale, full.shape[1] // scale * scale
+    rgb = full[:h2, :w2].reshape(h2 // scale, scale, w2 // scale, scale, 3).mean(axis=(1, 3))
     gray = rgb.mean(axis=2)
     saturation = rgb.max(axis=2) - rgb.min(axis=2)
     h, w = gray.shape
@@ -135,6 +149,8 @@ def find_page(image: Image.Image, bubbles: list[Box]) -> Box | None:
             return False
         colored, uniform = _boundary(*probe[0], paper)
         if colored:
+            return False
+        if _ui_separator(probe, paper):
             return False
         if uniform and len(probe) == run and all(_boundary(*p, paper)[1] for p in probe):
             return False

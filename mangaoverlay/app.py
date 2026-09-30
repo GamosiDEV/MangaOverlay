@@ -21,7 +21,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, realtime, screencast, screenshot, transfer
+from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, realtime, screenshot, transfer
 from .config import CONFIG_DIR, ENGINES, Config
 from .batch import BatchRunner, batch_key
 from .db import Database
@@ -737,7 +737,8 @@ class MangaOverlayApp(QObject):
             return
         self._busy = True
         self._auto = auto
-        if self._realtime is not None:
+        if self._realtime is not None and not auto:
+            # Pedido manual; no automático, o detector já está comparando a partir da tela que parou
             self._realtime.detector.busy()
         self._request += 1
         self._cancel = threading.Event()
@@ -814,6 +815,11 @@ class MangaOverlayApp(QObject):
         self._busy = False
         self._set_busy_tooltip(False)
         self.hide_translation()
+        if self._realtime is not None and self._realtime.detector.freeze():
+            # A tela mudou enquanto traduzia (a página nova demorou a abrir): o resultado é da tela antiga
+            _log("Tempo real: a tela mudou durante a tradução; resultado descartado")
+            self._realtime.detector.changed_again()
+            return
         font = base_font(self.config.font_family)
         texts = pages = 0
         for name, (result, size) in results.items():
@@ -842,6 +848,8 @@ class MangaOverlayApp(QObject):
         self._busy = False
         self._set_busy_tooltip(False)
         self.hide_translation()
+        if self._realtime is not None:
+            self._realtime.detector.freeze()
         _log(f"Falha ao processar a tela: {exc.__class__.__name__}: {exc}")
         self._rearm_realtime()
         if isinstance(exc, screenshot.CaptureCancelled):
@@ -860,6 +868,8 @@ class MangaOverlayApp(QObject):
 
     def _start_realtime(self) -> None:
         if is_wayland():
+            from . import screencast  # D-Bus (jeepney): só existe no Linux
+
             if not screencast.available():
                 self._realtime_off(screencast.MISSING_GSTREAMER)
                 return

@@ -71,3 +71,39 @@ def test_monitor_ligado_ou_desligado_conta_como_mudanca():
     a = _page(1)
     two = {**a, "outra": _page(5)["tela"]}
     assert _run(detector, [a, two]) == ["nada", "mudou"]
+
+
+def test_tela_mudou_enquanto_traduzia_descarta_o_resultado():
+    """A página nova abriu devagar (janela do visualizador aparecendo) no meio da tradução da tela antiga."""
+    detector = ChangeDetector()
+    a, b, c = _page(1), _page(2), _page(3)
+    assert _run(detector, [a, b, b, b])[-1] == "parou"  # traduzindo a tela b
+    _run(detector, [b, c, c])  # durante a tradução, a tela virou c
+    assert detector.freeze() is True  # o resultado é da tela b: descartar
+    detector.changed_again()
+    assert _run(detector, [c, c, c])[-1] == "parou"  # c parou: traduz de novo
+
+
+def test_tela_parada_durante_a_traducao_mostra_o_resultado():
+    detector = ChangeDetector()
+    a, b = _page(1), _page(2)
+    _run(detector, [a, b, b, b])
+    _run(detector, [b, b, _with_clock(b, 3)])
+    assert detector.freeze() is False
+
+
+def test_pedido_manual_compara_com_a_tela_do_comeco():
+    detector = ChangeDetector()
+    a, b = _page(1), _page(2)
+    _run(detector, [a, a])
+    detector.busy()  # atalho apertado: sem quadro "parado" de referência, vale o segundo durante a tradução
+    _run(detector, [b, a, b])  # o primeiro quadro (ainda com a tradução anterior) é ignorado
+    assert detector.freeze() is True
+
+
+def test_pedido_manual_ignora_a_traducao_anterior_sumindo():
+    detector = ChangeDetector()
+    a, with_old_overlay = _page(1), _page(4)
+    detector.busy()
+    _run(detector, [with_old_overlay, a, a])
+    assert detector.freeze() is False

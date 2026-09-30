@@ -54,7 +54,9 @@ class ChangeDetector:
     """Decide, quadro a quadro, quando esconder a tradução (a tela mudou) e quando traduzir de novo (parou).
 
     Estados: "observando" (há uma tela de referência, a que está traduzida), "mudando" (esperando parar) e
-    "ocupado" (o app está traduzindo; os quadros são ignorados até `rearm`).
+    "ocupado" (o app está traduzindo). No "ocupado", os quadros são comparados com a tela que está sendo traduzida:
+    se ela mudar antes de o resultado aparecer (a página nova demorou a abrir), `freeze` avisa e o resultado,
+    que é da tela antiga, é descartado.
     """
 
     def __init__(self) -> None:
@@ -62,18 +64,44 @@ class ChangeDetector:
         self._reference: Thumbs | None = None
         self._last: Thumbs | None = None
         self._still = 0
+        self._watching_busy = False  # comparando os quadros durante a tradução
+        self._dirty = False  # a tela mudou durante a tradução
+        self._skip = 0  # quadros a ignorar antes de fixar a tela traduzida (a tradução anterior ainda sumindo)
 
     def rearm(self) -> None:
         """A tela atual (com a tradução, se houver) vira a referência: o próximo quadro é o novo ponto de partida."""
         self.state = "observando"
         self._reference = None
+        self._watching_busy = self._dirty = False
 
     def busy(self) -> None:
+        """Tradução pedida sem um quadro "parado" de referência (atalho, ou o modo acabou de ligar): o primeiro quadro
+        durante a tradução é a tela traduzida."""
         self.state = "ocupado"
+        self._last = None
+        self._watching_busy, self._dirty = True, False
+        self._skip = 1  # no X11/Wayland, o primeiro quadro ainda pode ter a tradução anterior na tela
+
+    def freeze(self) -> bool:
+        """O resultado vai aparecer: para de comparar (a sobreposição não pode contar como mudança). True se a tela
+        mudou durante a tradução, isto é, se o resultado é de uma tela que já não está lá."""
+        self._watching_busy = False
+        return self._dirty
+
+    def changed_again(self) -> None:
+        """Resultado descartado: volta a esperar a tela parar."""
+        self.state, self._last, self._still, self._dirty = "mudando", None, 0, False
 
     def feed(self, frame: Thumbs) -> str:
         """Retorna "nada", "mudou" (esconder a tradução) ou "parou" (traduzir de novo)."""
         if self.state == "ocupado":
+            if self._watching_busy:
+                if self._skip:
+                    self._skip -= 1
+                elif self._last is None:
+                    self._last = frame
+                elif _changed_fraction(frame, self._last) > _CHANGED:
+                    self._dirty = True
             return "nada"
         if self.state == "observando":
             if self._reference is None:
@@ -84,13 +112,18 @@ class ChangeDetector:
             self.state, self._last, self._still = "mudando", frame, 0
             return "mudou"
         # mudando
+        if self._last is None:
+            self._last = frame
+            return "nada"
         if _changed_fraction(frame, self._last) <= _STILL:
             self._still += 1
         else:
             self._still = 0
         self._last = frame
         if self._still >= _STILL_FRAMES:
+            # O último quadro é a tela que vai ser traduzida: a comparação durante a tradução parte dele
             self.state = "ocupado"
+            self._watching_busy, self._dirty = True, False
             return "parou"
         return "nada"
 
