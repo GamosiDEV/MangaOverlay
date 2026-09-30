@@ -63,12 +63,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-translate", action="store_true", help="com --image: não traduz (use com --color)")
     parser.add_argument("--download-models", action="store_true", help="baixa todos os modelos locais agora (o instalador usa)")
     parser.add_argument("--export", metavar="ARQUIVO", help="exporta obras, capítulos e traduções para um .zip")
-    parser.add_argument("--obra", action="append", metavar="NOME", help="com --export: só esta obra (pode repetir); sem ela, todas")
+    parser.add_argument(
+        "--obra", action="append", metavar="NOME", help="com --export: só esta obra (pode repetir); sem ela, todas. Com --gerar: obrigatória"
+    )
     parser.add_argument(
         "--partes", metavar="LISTA", help="com --export: quais partes, separadas por vírgula: obras, paginas, traducoes (padrão: todas)"
     )
     parser.add_argument("--import", dest="import_file", metavar="ARQUIVO", help="importa um .zip exportado (mescla, sem sobrescrever)")
+    parser.add_argument(
+        "--gerar", metavar="PASTA", help="gera os capítulos importados da --obra com as traduções salvas desenhadas, nesta pasta"
+    )
+    parser.add_argument("--capitulo", action="append", metavar="NOME", help="com --gerar: só este capítulo (pode repetir); sem ele, todos")
+    parser.add_argument("--formato", default="cbz", help="com --gerar: cbz (padrão) ou pasta (uma pasta de imagens por capítulo)")
+    parser.add_argument(
+        "--traduzir-faltantes", action="store_true", help="com --gerar: traduz com o motor atual as falas que ainda não têm tradução"
+    )
     args = parser.parse_args(argv)
+
+    if args.gerar:
+        from .generate import run_cli as generate_cli
+
+        return generate_cli(args.gerar, args.obra, args.capitulo, args.formato, args.traduzir_faltantes)
 
     if args.export or args.import_file:
         from .transfer import run_cli

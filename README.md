@@ -230,6 +230,20 @@ Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continu
 
 O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: OpenAI, Claude, NLLB offline (grátis) e Google gratuito. Na leitura, qualquer tradução já paga com IA da obra é usada, mesmo que você esteja lendo com outro motor ou modelo.
 
+### Gerar capítulos traduzidos (CBZ ou imagens)
+
+"Gerar capítulos traduzidos…" no menu da bandeja (ou o botão "Gerar capítulo(s) traduzido(s)…" em "Obras e capítulos…") grava os capítulos importados com as traduções desenhadas nos balões. Dá para ler em qualquer leitor, inclusive no celular: copie o arquivo para o aparelho e abra no Mihon/Tachiyomi, Perfect Viewer ou outro leitor de quadrinhos.
+
+- **Formato:** **CBZ**, um arquivo por capítulo (recomendado; leva um `ComicInfo.xml` com obra e capítulo), ou **pasta de imagens**, uma pasta por capítulo. O app lembra o último formato e a última pasta.
+- **Sem custo:** usa as traduções já salvas da obra, de qualquer motor, e nada é traduzido de novo. O desenho é o mesmo do overlay, na resolução original da página.
+- **Falas sem tradução:** a janela mostra quantas faltam e sempre oferece traduzi-las com o motor atual, com o custo estimado antes (motores pagos começam desmarcados). Sem a opção, essas falas ficam como no original.
+- **Páginas não lidas** (importação pendente ou com erro) entram como no original. Se o arquivo original do capítulo foi movido, o capítulo é pulado com um aviso.
+- Parar no meio não deixa arquivo pela metade: os capítulos prontos ficam e o que estava em andamento não é gravado. Gerar de novo na mesma pasta substitui a versão anterior (com confirmação).
+
+Os arquivos originais nunca são alterados. As imagens geradas são para a sua leitura; compartilhá-las é responsabilidade de quem as gera.
+
+Pela linha de comando: `mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes]`.
+
 ### Exportar e importar dados
 
 Em **Exportar e importar dados** no menu da bandeja dá para levar obras, capítulos e traduções para outro computador, fazer backup ou compartilhar traduções.
@@ -320,6 +334,8 @@ mangaoverlay --download-models  # baixa todos os modelos de uma vez
 mangaoverlay --export dados.zip [--obra NOME]... [--partes obras,paginas,traducoes]
                               # exporta obras, páginas e traduções (todas, sem --obra/--partes)
 mangaoverlay --import dados.zip # importa, sem substituir nada do que já existe
+mangaoverlay --gerar PASTA --obra NOME [--capitulo NOME]... [--formato cbz|pasta] [--traduzir-faltantes]
+                              # grava os capítulos importados com as traduções desenhadas (CBZ ou pasta de imagens)
 mangaoverlay --image pagina.png [--out saida.png] [--engine local] [--source ja] [--color] [--no-translate]
                               # traduz e/ou colore um arquivo e grava o resultado (para testes)
 ```

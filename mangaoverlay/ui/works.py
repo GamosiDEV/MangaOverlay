@@ -61,7 +61,8 @@ class NewWorkDialog(QDialog):
 
 
 class WorksDialog(QDialog):
-    """`on_select(work | None)` troca a obra atual; `busy()` diz se há importação/lote rodando (bloqueia exclusões)."""
+    """`on_select(work | None)` troca a obra atual; `busy()` diz se há importação/lote rodando (bloqueia exclusões);
+    `on_generate(work, capítulos)` abre a geração dos capítulos traduzidos em imagem."""
 
     def __init__(
         self,
@@ -71,6 +72,7 @@ class WorksDialog(QDialog):
         on_select: Callable[[Work | None], None],
         busy: Callable[[], str | None],
         on_reread: Callable[[], None] = lambda: None,
+        on_generate: Callable[[Work, list[int]], None] = lambda _work, _chapters: None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -82,6 +84,7 @@ class WorksDialog(QDialog):
         self._on_select = on_select
         self._busy = busy
         self._on_reread = on_reread
+        self._on_generate = on_generate
 
         # Obras
         self.works = QListWidget()
@@ -122,7 +125,11 @@ class WorksDialog(QDialog):
         self.reread = QPushButton("Reler capítulo(s) selecionado(s)…")
         self.reread.setToolTip("Lê os balões de novo com a detecção atual; as traduções já feitas continuam salvas")
         self.reread.clicked.connect(self._reread)
+        self.generate = QPushButton("Gerar capítulo(s) traduzido(s)…")
+        self.generate.setToolTip("Grava os capítulos com as traduções desenhadas (CBZ ou pasta de imagens), para ler em qualquer leitor")
+        self.generate.clicked.connect(self._generate)
         chapter_buttons = QHBoxLayout()
+        chapter_buttons.addWidget(self.generate)
         chapter_buttons.addWidget(self.reread)
         chapter_buttons.addWidget(self.delete_chapters)
         self.summary = QLabel("")
@@ -255,6 +262,7 @@ class WorksDialog(QDialog):
     def _update_buttons(self) -> None:
         self.delete_chapters.setEnabled(bool(self._selected_chapters()))
         self.reread.setEnabled(bool(self._selected_chapters()))
+        self.generate.setEnabled(bool(self._selected_chapters()))
 
     def _delete_chapters(self) -> None:
         chosen = self._selected_chapters()
@@ -288,6 +296,12 @@ class WorksDialog(QDialog):
         self._db.reset_chapters([chapter_id for chapter_id, _name in chosen])
         self._on_reread()
         self._show_chapters()
+
+    def _generate(self) -> None:
+        work = self._selected_work()
+        chosen = self._selected_chapters()
+        if work is not None and chosen:
+            self._on_generate(work, [chapter_id for chapter_id, _name in chosen])
 
     def _not_busy(self) -> bool:
         reason = self._busy()

@@ -25,6 +25,7 @@ from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, realtime, screenshot
 from .config import CONFIG_DIR, ENGINES, Config
 from .batch import BatchRunner, batch_key
 from .db import Database
+from .generate import Generator
 from .importer import Importer
 from .sources import discover, load_page
 from .hotkeys import HotkeyManager
@@ -34,6 +35,7 @@ from .platform_info import is_wayland
 from .render import base_font
 from .ui.batchdialog import BatchDialog, BatchWindow
 from .ui.characters import CharactersDialog
+from .ui.generatedialog import GenerateDialog, GenerateWindow
 from .ui.icon import app_icon
 from .ui.memorydialog import MemoryDialog
 from .ui.namereview import NameReviewDialog
@@ -137,6 +139,13 @@ class MangaOverlayApp(QObject):
         self.importer.progress.connect(self._import_window.update_progress)
         self.importer.finished.connect(self._on_import_finished)
 
+        self.generator = Generator(self.db, self.pipeline, self)
+        self._generate_window = GenerateWindow()
+        self._generate_window.setWindowIcon(app_icon())
+        self._generate_window.stop_requested.connect(self.generator.stop)
+        self.generator.progress.connect(self._generate_window.update_progress)
+        self.generator.finished.connect(self._on_generate_finished)
+
         self.batch_runner = BatchRunner(self.db, self.pipeline, self)
         self._batch_window = BatchWindow()
         self._batch_window.setWindowIcon(app_icon())
@@ -219,6 +228,7 @@ class MangaOverlayApp(QObject):
         self._names_action = menu.addAction("Revisar nomes nas traduções…", self._review_names)
         menu.addAction("Importar capítulos…", self._import_chapters)
         self._batch_action = menu.addAction("Traduzir capítulos…", self._translate_chapters)
+        self._generate_action = menu.addAction("Gerar capítulos traduzidos…", lambda: self._generate_chapters())
         self._batch_resume_action = menu.addAction("", lambda: self._resume_batches(silent=False))
         self._batch_progress_action = menu.addAction("Andamento da tradução em lote…", self._show_batch_window)
         self._resume_action = menu.addAction("", lambda: self._resume_import(silent=False))
@@ -290,6 +300,7 @@ class MangaOverlayApp(QObject):
         # Também depois de pausar ou terminar (para ver o log) e com lote esperando a OpenAI
         self._batch_progress_action.setVisible(batch_running or self._batch_window.has_log or bool(self.db.batches(("ativo",))))
         self._batch_action.setEnabled(self.config.current_work is not None)
+        self._generate_action.setEnabled(self.config.current_work is not None)
 
     def _open_characters(self) -> None:
         work = self.db.work(self.config.current_work)
@@ -445,6 +456,42 @@ class MangaOverlayApp(QObject):
         via = " pela Batch API" if dialog.mode == "batch" else ""
         self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
 
+    # --- capítulos traduzidos em imagem ---------------------------------------------
+
+    def _generate_chapters(self, work=None, chapter_ids: list[int] | None = None) -> None:
+        """Pelo menu: capítulos da obra atual (todos marcados). Pela janela de obras: os capítulos selecionados lá."""
+        work = work or self.db.work(self.config.current_work)
+        if work is None:
+            return
+        if self.generator.running:
+            self._generate_window.show()
+            self._generate_window.raise_()
+            self._notify("Já há uma geração de capítulos em andamento; espere terminar ou pare antes de começar outra.", 5000)
+            return
+        if not self.db.chapters(work.id):
+            QMessageBox.information(
+                None, APP_DISPLAY_NAME, "Esta obra ainda não tem capítulos importados. Use “Importar capítulos…” primeiro."
+            )
+            return
+        dialog = GenerateDialog(self.db, work, replace(self.config), chapter_ids)
+        dialog.setWindowIcon(app_icon())
+        if dialog.exec() != GenerateDialog.DialogCode.Accepted:
+            return
+        folder = dialog.target_folder()
+        if dialog.fmt != self.config.generate_format or str(folder) != self.config.generate_dir:
+            self._update_config(generate_format=dialog.fmt, generate_dir=str(folder))
+        chapters = dialog.selected_chapters()
+        if self.generator.start(self.config, work, chapters, folder, dialog.fmt, dialog.translate_missing):
+            self._generate_window.start(len(chapters), folder)
+
+    def _on_generate_finished(self, summary) -> None:
+        self._generate_window.show_summary(summary)
+        if not self._generate_window.isVisible():
+            if summary.error:
+                self._notify(f"A geração de capítulos parou: {summary.error}", 12000, warning=True)
+            elif not summary.cancelled:
+                self._notify(f"{len(summary.files)} capítulo(s) traduzido(s) gerado(s) em {summary.folder}.", 8000)
+
     def _resumable_batches(self):
         """Só lotes pausados, do mais recente para o mais antigo. Lotes concluídos nunca são reenviados: blocos que
         "falharam" são falas que o modelo não traduz (reticências, onomatopeias), e reenviá-los só gastava."""
@@ -578,7 +625,7 @@ class MangaOverlayApp(QObject):
     def _open_works(self) -> None:
         dialog = WorksDialog(
             self.db, self.config.current_work, self.config.source_lang, self._select_work, self._busy_reason,
-            lambda: self._resume_import(silent=False),
+            lambda: self._resume_import(silent=False), self._generate_chapters,
         )
         dialog.setWindowIcon(app_icon())
         dialog.exec()
@@ -590,6 +637,8 @@ class MangaOverlayApp(QObject):
             return "Há uma importação em andamento."
         if self.batch_runner.running or self.db.batches(("ativo",)):
             return "Há uma tradução em lote em andamento."
+        if self.generator.running:
+            return "Há uma geração de capítulos traduzidos em andamento."
         return None
 
     def _export_data(self) -> None:
@@ -1099,8 +1148,10 @@ class MangaOverlayApp(QObject):
         self.tray.hide()
         self.importer.stop()  # o que faltar fica pendente e é retomado na próxima vez
         self.batch_runner.interrupt()  # idem: o lote continua ativo e volta ao abrir o app
+        self.generator.stop()  # o capítulo em andamento não é gravado; os prontos ficam
         self.importer.wait(10)
         self.batch_runner.wait(10)
+        self.generator.wait(10)
         self._worker.stop(5)  # não fecha o banco no meio de uma gravação
         self.db.close()
         self._qapp.quit()

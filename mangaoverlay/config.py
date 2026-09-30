@@ -63,6 +63,9 @@ class Config:
     memory_summary: bool = True
     names_model_openai: str = "gpt-5.4-nano"
     names_model_claude: str = "claude-haiku-4-5"
+    # Capítulos traduzidos em imagem: último formato ("cbz" ou "pasta") e última pasta de destino escolhidos
+    generate_format: str = "cbz"
+    generate_dir: str = ""
     # Usa a GPU (CUDA) para os modelos locais, se houver
     use_gpu: bool = True
 
