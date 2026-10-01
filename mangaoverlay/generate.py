@@ -53,6 +53,14 @@ _IMAGE_TOKENS = 1500
 _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def offscreen_qt() -> None:
+    """Qt sem janela, para desenhar em imagens na linha de comando. No Windows, a plataforma "offscreen" não enxerga as
+    fontes do sistema (só procura na pasta do próprio Qt, vazia): a fonte escolhida nas Configurações seria ignorada."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if sys.platform == "win32":
+        os.environ.setdefault("QT_QPA_FONTDIR", os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"))
+
+
 def work_config(config: Config, work: Work) -> Config:
     """A configuração atual aplicada à obra: o idioma de origem é sempre o dela."""
     return replace(config, current_work=work.id, source_lang=work.source_lang)
@@ -477,7 +485,7 @@ def run_cli(
     folder: str, works: list[str] | None, chapters: list[str] | None, fmt: str, translate_missing: bool, inpaint: bool = False
 ) -> int:
     """`--gerar PASTA --obra NOME [--capitulo NOME…] [--formato cbz|pasta] [--traduzir-faltantes] [--reconstruir]`."""
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    offscreen_qt()
     from PySide6.QtGui import QGuiApplication
 
     if fmt not in FORMATS:

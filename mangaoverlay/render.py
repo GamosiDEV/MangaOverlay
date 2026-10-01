@@ -37,12 +37,19 @@ def _fit_font(base: QFont, text: str, rect: QRectF) -> QFont:
     low, high = _MIN_SIZE, max(_MIN_SIZE, int(min(rect.height(), rect.width() * 0.5)))
     font = QFont(base)
     best = _MIN_SIZE
+    units = text.split(" ")  # palavras, com os sinais grudados por espaço não separável (ver _words)
     while low <= high:
         size = (low + high) // 2
         font.setPixelSize(size)
-        bounds = QFontMetricsF(font).boundingRect(rect, _FLAGS, text)
-        # Palavras maiores que a largura estouram para os lados em vez de quebrar
-        if bounds.height() <= rect.height() and bounds.width() <= rect.width() + 0.5:
+        metrics = QFontMetricsF(font)
+        bounds = metrics.boundingRect(rect, _FLAGS, text)
+        # Palavras maiores que a largura estouram para os lados em vez de quebrar; e uma palavra que não cabe inteira o
+        # Qt quebra à força em qualquer ponto ("-" numa linha, "Não." na outra): o tamanho só vale se todas couberem
+        if (
+            bounds.height() <= rect.height()
+            and bounds.width() <= rect.width() + 0.5
+            and max(metrics.horizontalAdvance(u) for u in units) <= rect.width() + 0.5
+        ):
             best, low = size, size + 1
         else:
             high = size - 1

@@ -11,7 +11,9 @@ from PIL import Image
 def translate_file(
     path: str, out: str | None, engine: str | None = None, source: str | None = None, colorize: bool = False, translate: bool = True
 ) -> int:
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from .generate import offscreen_qt
+
+    offscreen_qt()
     from PySide6.QtGui import QGuiApplication, QImage, QPainter
 
     from .config import ENGINES, Config
