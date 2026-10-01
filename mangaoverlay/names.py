@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from . import credentials, llm_anthropic, llm_openai, pricing
 from .config import Config
 from .db import ChapterTexts, Character, Database
+from .translators import Usage
 from .languages import source_english, target_english
 
 # Tratamentos que costumam vir logo depois de um nome
@@ -150,11 +151,17 @@ def _chunks(chapters: list[ChapterTexts]) -> list[list[ChapterTexts]]:
     return chunks
 
 
-def plan_survey(db: Database, work_id: int, config: Config, full: bool) -> SurveyPlan:
-    """O que o levantamento vai analisar e quanto deve custar (antes de enviar qualquer coisa)."""
+def plan_survey(db: Database, work_id: int, config: Config, full: bool, chapter_ids: list[int] | None = None) -> SurveyPlan:
+    """O que o levantamento vai analisar e quanto deve custar (antes de enviar qualquer coisa).
+
+    `chapter_ids`: só esses capítulos (os que ainda não foram analisados), com o modelo do levantamento completo; é o
+    que a tradução em lote usa antes de cada grupo de capítulos."""
     provider = _provider(config)
     chapters = db.chapter_texts(work_id, only_pending_names=True)
-    if not full:
+    if chapter_ids is not None:
+        wanted = set(chapter_ids)
+        chapters, full = [c for c in chapters if c.id in wanted], True
+    elif not full:
         chapters = chapters[: config.names_quick_chapters]
     if provider == "openai":
         model = config.names_model_openai if full else config.openai_model
@@ -169,19 +176,48 @@ def plan_survey(db: Database, work_id: int, config: Config, full: bool) -> Surve
 def run_survey(db: Database, work_id: int, plan: SurveyPlan, source: str, target: str) -> list[Character]:
     """Executa o levantamento e devolve só os personagens novos. Não grava nada: a lista e a marca de
     "capítulos analisados" só são salvas quando o usuário confirma a revisão (ver CharactersDialog)."""
+    return _survey(db, work_id, plan, source, target)[0]
+
+
+@dataclass
+class SurveyOutcome:
+    added: list[Character]
+    chapters: int  # capítulos analisados
+    cost: float
+    usage: Usage
+
+
+def survey_and_save(db: Database, work_id: int, config: Config, chapter_ids: list[int], source: str, target: str) -> SurveyOutcome:
+    """Levanta os nomes dos capítulos ainda não analisados entre `chapter_ids` e salva os personagens novos direto na
+    lista, sem revisão (tradução em lote e fluxo completo; a lista pode ser revisada depois). Levanta SurveyError ou
+    TranslationError se falhar; nada é gravado nesse caso."""
+    plan = plan_survey(db, work_id, config, full=True, chapter_ids=chapter_ids)
+    if not plan.chapters:
+        return SurveyOutcome([], 0, 0.0, Usage())
+    added, usage = _survey(db, work_id, plan, source, target)
+    if added:
+        db.save_characters(work_id, db.characters(work_id) + added)
+    db.mark_names_surveyed([c.id for c in plan.chapters])
+    cost = pricing.cost(plan.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens) or 0.0
+    return SurveyOutcome(added, len(plan.chapters), cost, usage)
+
+
+def _survey(db: Database, work_id: int, plan: SurveyPlan, source: str, target: str) -> tuple[list[Character], Usage]:
     known = db.characters(work_id)
+    total = Usage()
     found: dict[str, Character] = {}
     for chunk in _chunks(plan.chapters):
         text = "\n\n".join(f"### {c.name}\n" + "\n".join(c.texts) for c in chunk)
         instructions = _instructions(source, target, known + list(found.values()))
         if plan.provider == "openai":
-            raw, _usage = llm_openai.structured(
+            raw, usage = llm_openai.structured(
                 credentials.get_key(credentials.OPENAI), plan.model, instructions, text, _SCHEMA, "characters"
             )
         else:
-            raw, _usage = llm_anthropic.structured(
+            raw, usage = llm_anthropic.structured(
                 credentials.get_key(credentials.ANTHROPIC), plan.model, instructions, [{"type": "text", "text": text}], _SCHEMA
             )
+        total = total + usage
         try:
             items = json.loads(raw)["characters"]
         except (ValueError, KeyError, TypeError) as exc:
@@ -199,4 +235,5 @@ def run_survey(db: Database, work_id: int, plan: SurveyPlan, source: str, target
                 found.setdefault(character.name.casefold(), character)
 
     known_keys = {c.name.casefold() for c in known} | {c.original for c in known if c.original}
-    return [c for c in found.values() if c.name.casefold() not in known_keys and (not c.original or c.original not in known_keys)]
+    new = [c for c in found.values() if c.name.casefold() not in known_keys and (not c.original or c.original not in known_keys)]
+    return new, total

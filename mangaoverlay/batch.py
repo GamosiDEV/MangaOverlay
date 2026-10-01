@@ -23,8 +23,9 @@ from PySide6.QtCore import QObject, Signal
 
 from . import APP_NAME, credentials, llm_anthropic, llm_openai, openai_batch, pricing, translators
 from .config import ENGINES, Config
-from .db import Batch, BatchSummary, Character, Database, Memory, SourceLine, Term, TranslationKey, normalize
+from .db import Batch, BatchRequest, BatchSummary, Character, Database, Memory, PageGroup, SourceLine, Term, TranslationKey, normalize
 from .memory import estimate_summary_cost, summarize_chapters
+from .names import SurveyError, plan_survey, survey_and_save
 from .pipeline import Pipeline
 from .translators import Line, MalformedResponse, Result, TranslationError, Usage, llm_instructions, parse_response, parse_terms
 
@@ -127,6 +128,111 @@ def estimate(db: Database, config: Config, work_id: int, source_lang: str, chapt
     else:
         cost, max_pages = 0.0, 100
     return Estimate(len(page_ids), len(lines), new_lines, requests, input_tokens, output_tokens, cost, max_pages, summary_cost)
+
+
+# --- capítulos de memória e partes --------------------------------------------------------
+
+
+@dataclass
+class BatchOptions:
+    """Como os capítulos escolhidos são enviados (janela do lote e fluxo completo)."""
+
+    chapter_ids: list[int]
+    pages_per_block: int
+    mode: str = "normal"  # "normal" ou "batch"
+    memory_chapters: int = 0  # Batch API: os primeiros capítulos, traduzidos na hora para montar a memória
+    memory_block: int = 0  # páginas por pedido nesses capítulos; 0 = o mesmo do lote
+    parts: int = 1  # Batch API: o resto em tantos envios seguidos, com a memória atualizada entre eles
+    survey_names: bool = False  # levanta os nomes antes de cada grupo e salva direto
+
+    def memory_and_rest(self) -> tuple[list[int], list[int]]:
+        if self.mode != "batch":
+            return [], list(self.chapter_ids)
+        count = max(0, min(self.memory_chapters, len(self.chapter_ids)))
+        return list(self.chapter_ids[:count]), list(self.chapter_ids[count:])
+
+
+def split_parts(sizes: list[int], parts: int) -> list[list[int]]:
+    """Índices de capítulos (em ordem) divididos em até `parts` partes de tamanho parecido em páginas, sem cortar
+    capítulo: o resumo de cada capítulo precisa ficar pronto antes da parte seguinte."""
+    parts = max(1, min(parts, len(sizes)))
+    total = sum(sizes) or 1
+    result: list[list[int]] = [[]]
+    done = 0
+    for index, size in enumerate(sizes):
+        remaining_chapters = len(sizes) - index
+        remaining_parts = parts - len(result)
+        # Fecha a parte quando ela atinge a sua fração das páginas, mas nunca deixa parte vazia para trás
+        if result[-1] and remaining_parts and (done >= total * len(result) / parts or remaining_chapters <= remaining_parts):
+            result.append([])
+        result[-1].append(index)
+        done += size
+    return result
+
+
+def plan_groups(db: Database, options: BatchOptions) -> list[PageGroup]:
+    memory, rest = options.memory_and_rest()
+    groups = []
+    if memory:
+        block = options.memory_block or options.pages_per_block
+        groups.append(PageGroup(db.chapter_pages(memory), block, sync=True))
+    if options.mode == "batch" and rest:
+        pages = [db.chapter_pages([c]) for c in rest]
+        for number, indices in enumerate(split_parts([len(p) for p in pages], options.parts), start=1):
+            groups.append(PageGroup([page for i in indices for page in pages[i]], options.pages_per_block, part=number))
+    elif rest:
+        groups.append(PageGroup(db.chapter_pages(rest), options.pages_per_block))
+    return groups
+
+
+@dataclass
+class PlanCost:
+    """Custo estimado do lote por grupo. None: modelo sem preço conhecido."""
+
+    memory: float | None  # capítulos de memória (preço normal)
+    main: float | None  # o resto (com 50% de desconto na Batch API)
+    names: float | None  # levantamento de nomes
+    summaries: float | None  # resumos da memória
+    names_error: str | None = None  # não dá para levantar os nomes (sem chave de IA)
+
+    @property
+    def total(self) -> float | None:
+        values = [self.memory, self.main, self.names, self.summaries]
+        return None if any(v is None for v in values) else sum(values)
+
+
+def estimate_plan(db: Database, config: Config, work_id: int, source_lang: str, options: BatchOptions) -> tuple[Estimate, PlanCost]:
+    """Estimativa do lote inteiro (falas, pedidos, tokens) e o custo separado por grupo."""
+    whole = estimate(db, config, work_id, source_lang, options.chapter_ids, options.pages_per_block)
+    memory, rest = options.memory_and_rest()
+    discount = 0.5 if options.mode == "batch" else 1.0
+
+    def cost_of(chapters: list[int], block: int) -> float | None:
+        if not chapters:
+            return 0.0
+        e = estimate(db, config, work_id, source_lang, chapters, block)
+        return None if e.cost is None else e.cost
+
+    memory_cost = cost_of(memory, options.memory_block or options.pages_per_block)
+    main = cost_of(rest, options.pages_per_block)
+    names_cost, names_error = 0.0, None
+    key = batch_key(config, work_id, source_lang)
+    if options.survey_names and key.engine in LLM_ENGINES:
+        try:
+            names_cost = plan_survey(db, work_id, replace(config, engine=key.engine), True, options.chapter_ids).estimated_cost
+        except SurveyError as exc:
+            names_cost, names_error = 0.0, str(exc)
+    cost = PlanCost(memory_cost, None if main is None else main * discount, names_cost, whole.summary_cost, names_error)
+    return whole, cost
+
+
+def create_batch(db: Database, config: Config, work_id: int, source_lang: str, options: BatchOptions, estimated: float | None) -> int:
+    key = batch_key(config, work_id, source_lang)
+    pages = db.chapter_pages(options.chapter_ids)
+    survey = options.survey_names and key.engine in LLM_ENGINES
+    return db.create_batch(
+        work_id, key, options.pages_per_block, pages, estimated, options.mode, groups=plan_groups(db, options), survey_names=survey
+    )
 
 
 # --- execução ----------------------------------------------------------------------------
@@ -271,6 +377,9 @@ class BatchRunner(QObject):
         all_requests = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
         pending = [r for r in all_requests if r.state == "pendente"]
         context: deque[str] = deque(maxlen=_CONTEXT_LINES)
+        if pending and batch.survey_names:
+            self._survey_names(batch, key, config, pending, "os capítulos do lote")
+            characters = self._db.characters(batch.work_id)
         if pending:
             # Retomando: as falas do bloco anterior dão continuidade de cena
             previous = [r for r in all_requests if r.order < pending[0].order]
@@ -438,7 +547,12 @@ class BatchRunner(QObject):
         if not sync:
             return True
         self._log_start(batch, key, len(all_requests), len(all_requests) - sum(1 for r in all_requests if r.state != "pendente"))
-        self._log("info", f"Modo híbrido: traduzindo agora {len(sync)} bloco(s) do 1º capítulo, para montar a memória antes de enviar o resto")
+        chapters = len(self._db.request_chapters([r.id for r in sync]))
+        self._log(
+            "info", f"Capítulos de memória: traduzindo agora {len(sync)} bloco(s) de {chapters} capítulo(s), para montar a memória antes de enviar o resto"
+        )
+        if batch.survey_names:
+            self._survey_names(batch, key, config, sync, "os capítulos de memória")
         characters = self._db.characters(batch.work_id)
         context: deque[str] = deque(maxlen=_CONTEXT_LINES)
         for request in sync:
@@ -458,11 +572,56 @@ class BatchRunner(QObject):
         self.finished.emit(BatchOutcome(batch.id, state, self._db.batch_summary(batch.id), error))
 
     def _submit_remote(self, batch: Batch, key: TranslationKey, api_key: str, round: int, config: Config) -> None:
+        """Envia a parte atual (a primeira com blocos pendentes). Quando ela termina (nada mais a reenviar), atualiza a
+        memória, levanta os nomes da parte seguinte e envia essa, já com a memória nova."""
+        all_requests = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
+        parts = max((r.part for r in all_requests if not r.sync), default=0)
+        while True:
+            pending = [r for r in self._db.batch_requests(batch.id, ("pendente",)) if not r.sync]
+            if not pending:
+                self._db.set_remote(batch.id, None, None, round - 1)
+                self._finish(batch, "concluido", None)
+                return
+            part = min(r.part for r in pending)
+            current = [r for r in pending if r.part == part]
+            if round == 1 and batch.survey_names:
+                self._survey_names(batch, key, config, current, f"a parte {part}" if parts > 1 else "os capítulos do envio")
+            payload = self._payload(batch, key, round, current, all_requests)
+            if payload:
+                break
+            later = [r for r in pending if r.part > part]
+            if not later:
+                continue  # volta ao começo do laço, que conclui o lote
+            # Parte concluída: os capítulos dela são resumidos antes de a próxima ir, com a memória nova
+            self._update_memory(key, config, current[0].id)
+            self._log("ok", f"Parte {part} de {parts} concluída. Enviando a parte {later[0].part}, com a memória atualizada.")
+            round = 1
+
+        part_note = f" — parte {part} de {parts}" if parts > 1 else ""
+        if round == 1:
+            self._log_start(batch, key, len(all_requests), len(payload))
+        remote_id = openai_batch.submit(api_key, payload)
+        self._db.set_remote(batch.id, remote_id, "validating", round)
+        extra = f" (envio {round}: só as falas que faltaram)" if round > 1 else ""
+        self._log(
+            "info",
+            f"{len(payload)} pedido(s) enviados à Batch API da OpenAI{part_note}{extra} (id {remote_id}). "
+            "A OpenAI processa em segundo plano (em geral minutos, até 24 h); o app confere a cada minuto e pode ser fechado.",
+        )
+        self.progress.emit(
+            BatchProgress(batch.id, 0, len(payload), 0, self._db.batch_summary(batch.id).cost,
+                          f"{len(payload)} pedido(s) enviados à Batch API da OpenAI{part_note}{extra}. Aguardando a OpenAI processar…")
+        )
+
+    def _payload(
+        self, batch: Batch, key: TranslationKey, round: int, requests: list[BatchRequest], all_requests: list[BatchRequest]
+    ) -> dict[str, dict]:
+        """Os pedidos de uma parte: só as falas que ainda faltam. Blocos completos são marcados; depois de 2 rodadas
+        extras, o que sobrar fica como "falhou"."""
         characters = self._db.characters(batch.work_id)
         memory = self._db.memory(batch.work_id)  # mesma foto em todos os pedidos do envio (cache de prompt)
-        all_requests = self._db.batch_requests(batch.id, ("pendente", "concluida", "falhou"))
         payload: dict[str, dict] = {}
-        for request in self._db.batch_requests(batch.id, ("pendente",)):
+        for request in requests:
             missing = self._missing(key, self._db.request_lines(request.id))
             if not missing:
                 self._db.record_request(request.id, "concluida", (0, 0, 0), 0.0)
@@ -481,25 +640,25 @@ class BatchRunner(QObject):
             payload[str(request.id)] = llm_openai.text_body(
                 lines, context, key.source, key.target, key.model, characters, memory, batch.work_id
             )
+        return payload
 
-        if not payload:
-            self._db.set_remote(batch.id, None, None, round - 1)
-            self._finish(batch, "concluido", None)
+    def _survey_names(self, batch: Batch, key: TranslationKey, config: Config, requests: list[BatchRequest], label: str) -> None:
+        """Levanta os nomes dos capítulos dessas requisições ainda não analisados e salva direto na lista. Falhar aqui
+        não para o lote: os nomes são um extra (fica o aviso no log)."""
+        if key.engine not in LLM_ENGINES or not requests:
             return
-        if round == 1:
-            self._log_start(batch, key, len(all_requests), len(payload))
-        remote_id = openai_batch.submit(api_key, payload)
-        self._db.set_remote(batch.id, remote_id, "validating", round)
-        extra = f" (envio {round}: só as falas que faltaram)" if round > 1 else ""
-        self._log(
-            "info",
-            f"{len(payload)} pedido(s) enviados à Batch API da OpenAI{extra} (id {remote_id}). "
-            "A OpenAI processa em segundo plano (em geral minutos, até 24 h); o app confere a cada minuto e pode ser fechado.",
-        )
-        self.progress.emit(
-            BatchProgress(batch.id, 0, len(payload), 0, self._db.batch_summary(batch.id).cost,
-                          f"{len(payload)} pedido(s) enviados à Batch API da OpenAI{extra}. Aguardando a OpenAI processar…")
-        )
+        chapters = self._db.request_chapters([r.id for r in requests])
+        try:
+            outcome = survey_and_save(self._db, batch.work_id, replace(config, engine=key.engine), chapters, key.source, key.target)
+        except (SurveyError, TranslationError) as exc:
+            self._log("aviso", f"Não foi possível levantar os nomes de {label}: {exc} O lote segue sem isso.")
+            return
+        if not outcome.chapters:
+            return
+        names = ", ".join(c.name for c in outcome.added[:6]) + ("…" if len(outcome.added) > 6 else "")
+        found = f"{len(outcome.added)} personagem(ns) novo(s) salvo(s) na lista ({names})" if outcome.added else "nenhum personagem novo"
+        self._log("ok", f"Nomes de {label}: {outcome.chapters} capítulo(s) analisado(s), {found} · {pricing.format_cost(outcome.cost)}")
+        self._db.add_request_cost(requests[0].id, _usage_tuple(outcome.usage), outcome.cost)
 
     def _poll_remote(self, batch: Batch, key: TranslationKey, api_key: str, config: Config) -> None:
         remote = openai_batch.status(api_key, batch.remote_id)

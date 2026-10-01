@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QM
 
 from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, realtime, screenshot, transfer
 from .config import CONFIG_DIR, ENGINES, Config
-from .batch import BatchRunner, batch_key
+from .batch import BatchRunner, batch_key, create_batch
 from .db import Database
 from .generate import Generator
 from .importer import Importer
@@ -442,19 +442,17 @@ class MangaOverlayApp(QObject):
             return
         dialog = BatchDialog(self.db, work, replace(self.config))
         dialog.setWindowIcon(app_icon())
-        if dialog.exec() != BatchDialog.DialogCode.Accepted or dialog.estimate is None:
+        if dialog.exec() != BatchDialog.DialogCode.Accepted or dialog.options.estimate is None:
             return
-        pages_per_block = dialog.block.value()
-        if pages_per_block != self.config.batch_pages_per_block or dialog.mode != self.config.batch_mode:
-            self._update_config(batch_pages_per_block=pages_per_block, batch_mode=dialog.mode)
+        chosen = dialog.options
+        remembered = chosen.remember()
+        if any(getattr(self.config, k) != v for k, v in remembered.items()):
+            self._update_config(**remembered)
         key = batch_key(self.config, work.id, work.source_lang)
-        pages = self.db.chapter_pages(dialog.selected_chapters())
-        cost = dialog.estimate.cost
-        if dialog.mode == "batch" and cost is not None:
-            cost *= 0.5
-        self.db.create_batch(work.id, key, pages_per_block, pages, cost, dialog.mode, dialog.sync_pages())
-        via = " pela Batch API" if dialog.mode == "batch" else ""
-        self._start_batches(f"Traduzindo {dialog.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
+        options = chosen.options()
+        create_batch(self.db, self.config, work.id, work.source_lang, options, chosen.cost.total)
+        via = " pela Batch API" if options.mode == "batch" else ""
+        self._start_batches(f"Traduzindo {chosen.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
 
     # --- capítulos traduzidos em imagem ---------------------------------------------
 

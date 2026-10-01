@@ -59,6 +59,13 @@ class Config:
     batch_pages_per_block: int = 20
     # Último modo escolhido para o lote: "normal" ou "batch" (Batch API da OpenAI)
     batch_mode: str = "normal"
+    # Batch API: capítulos traduzidos na hora para montar a memória, páginas por pedido neles (0 = o mesmo do lote) e
+    # em quantas partes o resto vai, com a memória atualizada entre elas
+    batch_memory_chapters: int = 1
+    batch_memory_block: int = 0
+    batch_parts: int = 1
+    # Levanta os nomes antes de cada grupo de capítulos e salva direto na lista
+    batch_survey_names: bool = True
     # Memória da obra: resumo da história atualizado a cada capítulo traduzido em lote (modelo barato)
     memory_summary: bool = True
     names_model_openai: str = "gpt-5.4-nano"

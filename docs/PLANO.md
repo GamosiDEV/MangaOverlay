@@ -146,6 +146,23 @@ Decidida em 30/09/2026. A ideia: traduzir no PC e ler no celular, num leitor com
 
 **Pronto quando:** texto de narração sobre o desenho sai sem retângulo, com o desenho refeito por baixo. ✅ Verificado no Berserk vol. 11 (tijolos e retícula reconstruídos); o volume inteiro (248 páginas) levou 42 s com a opção, contra 31 s sem.
 
+### Fase 12: Memória antes do lote e envio em partes
+
+Decidida em 01/10/2026. Generaliza o modo híbrido (que traduzia só o 1º capítulo na hora).
+
+- [x] **Capítulos de memória:** na Batch API, os X primeiros capítulos marcados são traduzidos na hora, em pedidos de y páginas, para montar o glossário e o resumo antes do resto ir à OpenAI. O tamanho y é opcional: sem escolher, vale o mesmo dos blocos do lote.
+- [x] **Envio em Z partes:** o resto vai à Batch API em Z envios seguidos, divididos nos limites dos capítulos. Depois de cada parte, os capítulos completos são resumidos e o glossário é consolidado, e a parte seguinte vai com a memória nova.
+- [x] **Nomes automáticos:** antes de cada grupo (capítulos de memória, cada parte, ou o lote inteiro no envio normal), os capítulos ainda não analisados passam pelo levantamento de nomes (modelo barato) e os personagens novos são **salvos direto** na lista (dá para revisar depois). Só com motores de IA; uma falha no levantamento só gera um aviso.
+- [x] Custo estimado separando capítulos de memória (preço normal), partes (Batch API, 50%) e levantamento de nomes.
+
+**Pronto quando:** um lote na Batch API com capítulos de memória e 3 partes manda uma parte de cada vez, com o resumo e os nomes atualizados entre elas. ✅ Verificado com a OpenAI simulada (`tests/test_batch_parts.py`: uma parte por vez, rodadas recomeçando na parte nova, nomes levantados só dos capítulos da parte).
+
+### Fase 13: Fluxo completo (obra → capítulos → tradução → resultado)
+
+- [ ] Assistente com tudo configurado de uma vez: obra (existente ou nova), capítulos (importar novos e/ou escolher já importados), tradução (motor, modelo, modo, blocos, memória, partes, nomes) e resultado (gerar ou não, CBZ ou pasta, pasta de destino, reconstruir o desenho).
+- [ ] **Limite de custo:** capítulos novos só têm custo conhecido depois da leitura; se a estimativa passar do limite, o fluxo pausa e pergunta, senão segue sozinho.
+- [ ] Executor que roda uma etapa atrás da outra (importar → traduzir → gerar), com o estado salvo no banco: fechar o app no meio (por exemplo, esperando a Batch API) não perde o fluxo, que continua ao abrir de novo.
+
 ## Custos de referência (gpt-4.1-mini)
 
 Premissas: página típica com ~10 balões (~300 tokens de texto lido e ~500 de tradução); blocos de 20 páginas; Batch API.
