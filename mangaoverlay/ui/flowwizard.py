@@ -1,10 +1,12 @@
 """Fluxo completo: o assistente que junta todas as escolhas (obra → capítulos → tradução → resultado) e a janela que
 mostra o andamento das etapas (ver flow.py)."""
 
+import html
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
@@ -30,7 +33,7 @@ from .. import APP_DISPLAY_NAME, pricing
 from ..batch import LLM_ENGINES
 from ..config import CLAUDE_MODELS, ENGINES, OPENAI_MODELS, Config
 from ..db import Database, Work
-from ..flow import STEP_LABELS, STEPS, FlowOptions
+from ..flow import LOG_FILE, STEP_LABELS, STEPS, FlowOptions, read_log
 from ..languages import SOURCES, source_name
 from ..sources import ChapterSource, discover
 from .batchdialog import TranslationOptions
@@ -456,12 +459,15 @@ class _SummaryPage(QWizardPage):
 
 
 class FlowWindow(QWidget):
-    """Andamento de um fluxo: as etapas, a mensagem atual e os botões para continuar ou cancelar."""
+    """Andamento de um fluxo: as etapas, a mensagem atual, o passo a passo (log) e os botões para continuar, cancelar e
+    abrir a pasta do resultado."""
+
+    _LEVELS = {"info": ("•", ""), "ok": ("✓", "#2e8b57"), "aviso": ("⚠", "#d35400"), "erro": ("✖", "#c0392b")}
 
     def __init__(self, db: Database, runner, parent: QWidget | None = None):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle(f"Fluxo completo — {APP_DISPLAY_NAME}")
-        self.setMinimumWidth(520)
+        self.resize(720, 560)
         self._db = db
         self._runner = runner
         self._flow_id: int | None = None
@@ -471,13 +477,30 @@ class FlowWindow(QWidget):
         self.steps.setTextFormat(Qt.TextFormat.RichText)
         self.message = QLabel("")
         self.message.setWordWrap(True)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(5000)
+        self.log_view.setPlaceholderText("Nada registrado ainda.")
+        copy = QPushButton("Copiar log")
+        copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.log_view.toPlainText()))
+        open_log = QPushButton("Abrir arquivo de log")
+        open_log.setToolTip(str(LOG_FILE))
+        open_log.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_FILE))))
+        self.open_folder = QPushButton("Abrir pasta")
+        self.open_folder.clicked.connect(self._open_folder)
         self.resume = QPushButton("Continuar")
         self.resume.clicked.connect(self._resume)
         self.cancel = QPushButton("Cancelar fluxo")
         self.cancel.clicked.connect(self._cancel)
         close = QPushButton("Fechar")
         close.clicked.connect(self.hide)
+        log_buttons = QHBoxLayout()
+        log_buttons.addWidget(QLabel("<b>Passo a passo</b>"))
+        log_buttons.addStretch(1)
+        log_buttons.addWidget(copy)
+        log_buttons.addWidget(open_log)
         buttons = QHBoxLayout()
+        buttons.addWidget(self.open_folder)
         buttons.addStretch(1)
         for button in (self.resume, self.cancel, close):
             buttons.addWidget(button)
@@ -485,18 +508,35 @@ class FlowWindow(QWidget):
         layout.addWidget(self.title)
         layout.addWidget(self.steps)
         layout.addWidget(self.message)
+        layout.addLayout(log_buttons)
+        layout.addWidget(self.log_view, 1)
         layout.addLayout(buttons)
         runner.changed.connect(self._on_changed)
+        runner.log.connect(self._on_log)
 
     def show_flow(self, flow_id: int) -> None:
-        self._flow_id = flow_id
+        if flow_id != self._flow_id:
+            self._flow_id = flow_id
+            self.log_view.clear()
+            for entry in read_log(flow_id):
+                self._append(entry)
         self.refresh()
         self.show()
         self.raise_()
+        self.activateWindow()
 
     def _on_changed(self, flow_id: int) -> None:
         if flow_id == self._flow_id:
             self.refresh()
+
+    def _on_log(self, entry) -> None:
+        if entry.flow_id == self._flow_id:
+            self._append(entry)
+
+    def _append(self, entry) -> None:
+        symbol, color = self._LEVELS.get(entry.level, ("•", ""))
+        text = html.escape(f"{entry.time:%H:%M:%S}  {symbol} {entry.message}")
+        self.log_view.appendHtml(f"<span style='color:{color}'>{text}</span>" if color else text)
 
     def refresh(self) -> None:
         flow = self._db.flow(self._flow_id) if self._flow_id is not None else None
@@ -504,7 +544,8 @@ class FlowWindow(QWidget):
             return
         work = self._db.work(flow.work_id)
         options = FlowOptions.from_json(flow.options)
-        self.title.setText(f"<b>{work.name if work else '?'}</b> — {len(options.chapter_ids)} capítulo(s)")
+        state = {"ativo": "em andamento", "pausado": "pausado", "concluido": "concluído", "cancelado": "cancelado"}[flow.state]
+        self.title.setText(f"<b>{work.name if work else '?'}</b> — {len(options.chapter_ids)} capítulo(s) · {state}")
         current = STEPS.index(flow.step)
         rows = []
         for index, step in enumerate(STEPS[:-1]):
@@ -519,11 +560,18 @@ class FlowWindow(QWidget):
             label = STEP_LABELS[step]
             rows.append(f"{mark} <b>{label}</b>" if index == current and flow.state != "concluido" else f"{mark} {label}")
         self.steps.setText("<br>".join(rows))
-        self.message.setText(flow.message or "")
+        done = flow.state == "concluido"
+        self.message.setText(f"<b style='color:#2e8b57'>{html.escape(flow.message or '')}</b>" if done else html.escape(flow.message or ""))
         paused = flow.state == "pausado"
         self.resume.setVisible(paused)
         self.resume.setText("Continuar mesmo assim" if paused and flow.step == "custo" else "Continuar")
         self.cancel.setVisible(flow.state in ("ativo", "pausado"))
+        self.open_folder.setVisible(bool(options.generated))
+        self._folder = options.folder
+
+    def _open_folder(self) -> None:
+        if self._folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._folder))
 
     def _resume(self) -> None:
         flow = self._db.flow(self._flow_id)

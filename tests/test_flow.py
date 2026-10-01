@@ -1,13 +1,14 @@
 """Fluxo completo com importador, lote e geração falsos (python -m pytest tests)."""
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from mangaoverlay import flow as flow_module
 from mangaoverlay.config import Config
 from mangaoverlay.db import Database, TranslationKey
-from mangaoverlay.flow import FlowOptions, FlowRunner
+from mangaoverlay.flow import FlowOptions, FlowRunner, read_log
+from mangaoverlay.generate import GenerateSummary
 
 
 class FakeImporter:
@@ -40,7 +41,8 @@ class FakeGenerator:
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(flow_module, "LOG_FILE", tmp_path / "fluxo.log")
     db = Database(tmp_path / "banco.db")
     work = db.create_work("Obra", "ja")
     chapter = db.add_chapter(work.id, "Cap 1", 1, "/m/cap1", ["1.png", "2.png"])
@@ -68,9 +70,16 @@ def test_fluxo_inteiro(setup, tmp_path):
     runner.tick()
     assert db.flow(flow_id).step == "gerar"
     assert generator.calls == [([chapter], Path(tmp_path / "saida"), "pasta", True)]
-    runner.generation_finished(SimpleNamespace(error=None, cancelled=False, files=[tmp_path / "saida" / "Cap 1"]))
+    attention = []
+    runner.attention.connect(attention.append)
+    runner.generation_finished(GenerateSummary(tmp_path / "saida", [tmp_path / "saida" / "Cap 1"], 2, 5, 0, 0, [], False, None))
     flow = db.flow(flow_id)
     assert (flow.state, flow.step) == ("concluido", "fim") and "1 arquivo" in flow.message and notes
+    assert attention == [flow_id]  # o app abre a janela do fluxo no fim
+    # O passo a passo ficou no log (arquivo), na ordem
+    log = [e.message for e in read_log(flow_id, flow_module.LOG_FILE)]
+    assert log[0].startswith("Fluxo iniciado") and log[-1].startswith("Fluxo concluído")
+    assert any(m.startswith("Lendo 2 página") for m in log) and any(m.startswith("Gerado: 1 arquivo") for m in log)
 
 
 def test_custo_acima_do_limite_pausa_e_continua_se_aceito(setup):

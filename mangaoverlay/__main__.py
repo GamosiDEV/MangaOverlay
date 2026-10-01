@@ -11,12 +11,18 @@ import sys
 from . import APP_ID, APP_NAME, ipc
 
 _LOG_LIMIT = 5 * 1024 * 1024
+_COMMANDS = {"-h", "--help", "--image", "--gerar", "--export", "--import", "--download-models"}
 
 
 def _prepare_streams() -> None:
-    """Aberto pelo atalho do Windows (pythonw.exe), o app não tem console: stdout e stderr são None, e qualquer
-    print ou barra de progresso de download derrubaria o processo. Nesse caso a saída vai para um arquivo de log."""
-    if sys.stdout is None or sys.stderr is None:
+    """Sem terminal, a saída vai para um arquivo de log: no Windows (pythonw.exe), stdout e stderr são None e qualquer
+    print derrubaria o processo; no Linux, aberto pelo menu ou pelo instalador, ela iria para /dev/null, e um crash não
+    deixava rastro nenhum. No terminal, continua no terminal."""
+    # Comandos de linha de comando (inclusive em scripts e pipes) escrevem onde foram chamados
+    command = any(arg.split("=")[0] in _COMMANDS for arg in sys.argv[1:])
+    no_console = sys.stdout is None or sys.stderr is None
+    detached = no_console or not (command or sys.stderr.isatty() or os.environ.get("MANGAOVERLAY_CONSOLE"))
+    if detached:
         from pathlib import Path
 
         from platformdirs import user_log_dir
@@ -26,9 +32,13 @@ def _prepare_streams() -> None:
         log_file = log_dir / f"{APP_ID}.log"
         mode = "w" if log_file.exists() and log_file.stat().st_size > _LOG_LIMIT else "a"
         log = open(log_file, mode, encoding="utf-8", buffering=1)  # noqa: SIM115 (fica aberto até o fim)
-        sys.stdout = sys.stdout or log
-        sys.stderr = sys.stderr or log
+        sys.stdout = sys.stderr = log
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        from datetime import datetime
+
+        from . import __version__
+
+        print(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} MangaOverlay {__version__} (pid {os.getpid()}) =====", flush=True)
     # Console ou pipe do Windows em cp1252: texto japonês não pode derrubar um print
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -40,6 +50,17 @@ def _prepare_streams() -> None:
         faulthandler.enable(file=sys.stderr, all_threads=True)
     except (AttributeError, OSError, ValueError):  # stderr sem descritor de arquivo
         pass
+    # Erro não tratado numa thread de trabalho (importação, lote, geração): registra com a pilha, em vez de sumir
+    import threading
+    import traceback
+
+    def thread_error(args) -> None:
+        name = args.thread.name if args.thread else "?"
+        print(f"Erro não tratado na thread {name}:", file=sys.stderr)
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr)
+        sys.stderr.flush()
+
+    threading.excepthook = thread_error
 
 
 def main(argv: list[str] | None = None) -> int:
