@@ -168,6 +168,19 @@ _MIGRATIONS = [
     ALTER TABLE requisicoes ADD COLUMN parte INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE lotes ADD COLUMN levantar_nomes INTEGER NOT NULL DEFAULT 0;
     """,
+    # 9: fluxo completo (importar → traduzir → gerar), com as escolhas em JSON e a etapa atual: sobrevive a fechar o app
+    """
+    CREATE TABLE fluxos (
+        id INTEGER PRIMARY KEY,
+        obra_id INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+        estado TEXT NOT NULL DEFAULT 'ativo' CHECK (estado IN ('ativo', 'pausado', 'concluido', 'cancelado')),
+        etapa TEXT NOT NULL DEFAULT 'importar',
+        opcoes TEXT NOT NULL,
+        lote_id INTEGER REFERENCES lotes(id) ON DELETE SET NULL,
+        mensagem TEXT,
+        criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 
@@ -297,6 +310,19 @@ class PageGroup:
     block: int
     sync: bool = False
     part: int = 0
+
+
+@dataclass(frozen=True)
+class FlowRow:
+    """Um fluxo completo salvo (ver flow.py): as escolhas ficam em `options` (JSON)."""
+
+    id: int
+    work_id: int
+    state: str  # "ativo", "pausado", "concluido" ou "cancelado"
+    step: str
+    options: str
+    batch_id: int | None
+    message: str | None
 
 
 @dataclass(frozen=True)
@@ -784,6 +810,56 @@ class Database:
                 chapter_ids,
             ).fetchall()
         return [row[0] for row in rows]
+
+    # --- fluxo completo ----------------------------------------------------------------
+
+    def create_flow(self, work_id: int, options: str) -> int:
+        with self._lock:
+            return self._conn.execute("INSERT INTO fluxos (obra_id, opcoes) VALUES (?, ?)", (work_id, options)).lastrowid
+
+    def flows(self, states: tuple[str, ...] = ("ativo",)) -> list[FlowRow]:
+        marks = ",".join("?" * len(states))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, obra_id, estado, etapa, opcoes, lote_id, mensagem FROM fluxos WHERE estado IN ({marks}) ORDER BY id",
+                states,
+            ).fetchall()
+        return [FlowRow(*row) for row in rows]
+
+    def flow(self, flow_id: int) -> FlowRow | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, obra_id, estado, etapa, opcoes, lote_id, mensagem FROM fluxos WHERE id = ?", (flow_id,)
+            ).fetchone()
+        return FlowRow(*row) if row else None
+
+    _FLOW_COLUMNS = {"state": "estado", "step": "etapa", "options": "opcoes", "batch_id": "lote_id", "message": "mensagem"}
+
+    def update_flow(self, flow_id: int, **changes) -> None:
+        """Muda as colunas dadas (state, step, options, batch_id, message)."""
+        sets = ", ".join(f"{self._FLOW_COLUMNS[k]} = ?" for k in changes)
+        with self._lock:
+            self._conn.execute(f"UPDATE fluxos SET {sets} WHERE id = ?", (*changes.values(), flow_id))
+
+    def batch_state(self, batch_id: int) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT estado FROM lotes WHERE id = ?", (batch_id,)).fetchone()
+        return row[0] if row else None
+
+    def unread_pages(self, chapter_ids: list[int]) -> int:
+        """Páginas ainda pendentes de leitura (detecção e OCR) nesses capítulos."""
+        if not chapter_ids:
+            return 0
+        marks = ",".join("?" * len(chapter_ids))
+        with self._lock:
+            return self._conn.execute(
+                f"SELECT COUNT(*) FROM paginas WHERE estado = 'pendente' AND capitulo_id IN ({marks})", chapter_ids
+            ).fetchone()[0]
+
+    def chapter_by_origin(self, work_id: int, origin: str) -> int | None:
+        with self._lock:
+            row = self._conn.execute("SELECT id FROM capitulos WHERE obra_id = ? AND origem = ?", (work_id, origin)).fetchone()
+        return row[0] if row else None
 
     # --- capítulos traduzidos em imagem ----------------------------------------------
 

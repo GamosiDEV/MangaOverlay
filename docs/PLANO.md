@@ -159,9 +159,11 @@ Decidida em 01/10/2026. Generaliza o modo híbrido (que traduzia só o 1º capí
 
 ### Fase 13: Fluxo completo (obra → capítulos → tradução → resultado)
 
-- [ ] Assistente com tudo configurado de uma vez: obra (existente ou nova), capítulos (importar novos e/ou escolher já importados), tradução (motor, modelo, modo, blocos, memória, partes, nomes) e resultado (gerar ou não, CBZ ou pasta, pasta de destino, reconstruir o desenho).
-- [ ] **Limite de custo:** capítulos novos só têm custo conhecido depois da leitura; se a estimativa passar do limite, o fluxo pausa e pergunta, senão segue sozinho.
-- [ ] Executor que roda uma etapa atrás da outra (importar → traduzir → gerar), com o estado salvo no banco: fechar o app no meio (por exemplo, esperando a Batch API) não perde o fluxo, que continua ao abrir de novo.
+- [x] Assistente com tudo configurado de uma vez: obra (existente ou nova), capítulos (importar novos e/ou escolher já importados), tradução (motor, modelo, modo, blocos, memória, partes, nomes) e resultado (gerar ou não, CBZ ou pasta, pasta de destino, reconstruir o desenho).
+- [x] **Limite de custo:** capítulos novos só têm custo conhecido depois da leitura; se a estimativa passar do limite, o fluxo pausa e pergunta, senão segue sozinho.
+- [x] Executor que roda uma etapa atrás da outra (importar → traduzir → gerar), com o estado salvo no banco: fechar o app no meio (por exemplo, esperando a Batch API) não perde o fluxo, que continua ao abrir de novo.
+
+**Pronto quando:** um clique leva uma obra nova de capítulos em CBZ até o resultado gerado, sem outra intervenção. ✅ Verificado de verdade (obra nova, capítulo de 3 páginas, NLLB e geração em pasta com reconstrução: 18 s do começo ao fim, com os mesmos componentes e sinais do app) e com executores simulados em `tests/test_flow.py` (custo acima do limite pausa e continua se aceito; lote pausado espera; nada a traduzir pula para o fim). Fora por enquanto: conferir o idioma das páginas de uma obra nova (como faz "Importar capítulos…").
 
 ## Custos de referência (gpt-4.1-mini)
 

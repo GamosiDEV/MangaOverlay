@@ -25,6 +25,7 @@ from . import APP_DISPLAY_NAME, APP_NAME, credentials, ipc, realtime, screenshot
 from .config import CONFIG_DIR, ENGINES, Config
 from .batch import BatchRunner, batch_key, create_batch
 from .db import Database
+from .flow import FlowRunner
 from .generate import Generator
 from .importer import Importer
 from .sources import discover, load_page
@@ -35,6 +36,7 @@ from .platform_info import is_wayland
 from .render import base_font
 from .ui.batchdialog import BatchDialog, BatchWindow
 from .ui.characters import CharactersDialog
+from .ui.flowwizard import FlowWindow, FlowWizard
 from .ui.generatedialog import GenerateDialog, GenerateWindow
 from .ui.icon import app_icon
 from .ui.memorydialog import MemoryDialog
@@ -160,6 +162,21 @@ class MangaOverlayApp(QObject):
         self.batch_runner.log.connect(self._batch_window.add_log)
         self.batch_runner.finished.connect(self._on_batch_finished)
 
+        # Fluxo completo: usa o importador, o lote e a geração; avança nos sinais deles e a cada 5 s (estado no banco)
+        self.flows = FlowRunner(
+            self.db, lambda: self.config, self.importer, self.batch_runner, self.generator,
+            lambda message, warning: self._notify(message, 10000, warning=warning), self,
+        )
+        self._flow_window = FlowWindow(self.db, self.flows)
+        self._flow_window.setWindowIcon(app_icon())
+        self.importer.finished.connect(lambda _summary: self.flows.tick())
+        self.batch_runner.finished.connect(lambda _outcome: self.flows.tick())
+        self.generator.finished.connect(self.flows.generation_finished)
+        self._flow_timer = QTimer(self)
+        self._flow_timer.setInterval(5000)
+        self._flow_timer.timeout.connect(self.flows.tick)
+        self._flow_timer.start()
+
         self._build_tray()
         # No tempo real, os avisos de andamento só iriam poluir a tela (e a notificação mudaria a tela no meio da tradução)
         self.status.connect(lambda message: None if self._auto else self._notify(message, 5000))
@@ -172,6 +189,9 @@ class MangaOverlayApp(QObject):
         self._apply_realtime()
         self._resume_import(silent=True)
         self._resume_batches(silent=True)
+        if self.db.flows(("ativo",)):
+            self._notify("Continuando o fluxo completo de onde parou.", 5000)
+            self.flows.tick()
 
     def _warm_up(self) -> None:
         # Na fila de trabalho: um atalho apertado durante o carregamento só espera a vez
@@ -226,6 +246,8 @@ class MangaOverlayApp(QObject):
         self._characters_action = menu.addAction("Personagens da obra…", self._open_characters)
         self._memory_action = menu.addAction("Memória da obra…", self._open_memory)
         self._names_action = menu.addAction("Revisar nomes nas traduções…", self._review_names)
+        menu.addAction("Fluxo completo (obra → capítulos → tradução → resultado)…", self._open_flow_wizard)
+        self._flow_progress_action = menu.addAction("Andamento do fluxo…", self._show_flow_window)
         menu.addAction("Importar capítulos…", self._import_chapters)
         self._batch_action = menu.addAction("Traduzir capítulos…", self._translate_chapters)
         self._generate_action = menu.addAction("Gerar capítulos traduzidos…", lambda: self._generate_chapters())
@@ -301,6 +323,7 @@ class MangaOverlayApp(QObject):
         self._batch_progress_action.setVisible(batch_running or self._batch_window.has_log or bool(self.db.batches(("ativo",))))
         self._batch_action.setEnabled(self.config.current_work is not None)
         self._generate_action.setEnabled(self.config.current_work is not None)
+        self._flow_progress_action.setVisible(bool(self.db.flows(("ativo", "pausado"))))
 
     def _open_characters(self) -> None:
         work = self.db.work(self.config.current_work)
@@ -453,6 +476,30 @@ class MangaOverlayApp(QObject):
         create_batch(self.db, self.config, work.id, work.source_lang, options, chosen.cost.total)
         via = " pela Batch API" if options.mode == "batch" else ""
         self._start_batches(f"Traduzindo {chosen.estimate.new_lines} falas de “{work.name}” com {key.model}{via}…")
+
+    # --- fluxo completo --------------------------------------------------------------
+
+    def _open_flow_wizard(self) -> None:
+        wizard = FlowWizard(self.db, replace(self.config), self.config.current_work)
+        wizard.setWindowIcon(app_icon())
+        if wizard.exec() != FlowWizard.DialogCode.Accepted:
+            return
+        work = wizard.work()
+        chapter_ids = wizard.chapter_ids(work)
+        if not chapter_ids:
+            return
+        options = wizard.options(chapter_ids)
+        remembered = wizard.remember()
+        if any(getattr(self.config, k) != v for k, v in remembered.items()):
+            self._update_config(**remembered)
+        self._select_work(work)
+        flow_id = self.flows.start(work.id, options)
+        self._flow_window.show_flow(flow_id)
+
+    def _show_flow_window(self) -> None:
+        flows = self.db.flows(("ativo", "pausado"))
+        if flows:
+            self._flow_window.show_flow(flows[-1].id)
 
     # --- capítulos traduzidos em imagem ---------------------------------------------
 
@@ -638,6 +685,8 @@ class MangaOverlayApp(QObject):
             return "Há uma tradução em lote em andamento."
         if self.generator.running:
             return "Há uma geração de capítulos traduzidos em andamento."
+        if self.db.flows(("ativo",)):
+            return "Há um fluxo completo em andamento."
         return None
 
     def _export_data(self) -> None:
@@ -1141,6 +1190,7 @@ class MangaOverlayApp(QObject):
         if self._realtime is not None:
             self._realtime.stop()
         self._batch_poll.stop()  # o banco vai ser fechado; a conferência da Batch API não pode disparar depois
+        self._flow_timer.stop()
         self.hotkeys.stop()
         self._ipc.close()
         self.hide_translation()

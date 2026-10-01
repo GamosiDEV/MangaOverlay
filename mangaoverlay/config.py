@@ -75,6 +75,9 @@ class Config:
     generate_dir: str = ""
     # Reconstruir o desenho por baixo do texto fora dos balões nos capítulos gerados (LaMa, ~200 MB)
     generate_inpaint: bool = False
+    # Fluxo completo: limite de custo (US$) acima do qual pausa e pergunta, e se gera o resultado no fim
+    flow_cost_limit: float = 1.0
+    flow_generate: bool = True
     # Usa a GPU (CUDA) para os modelos locais, se houver
     use_gpu: bool = True
 
