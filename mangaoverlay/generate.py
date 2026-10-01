@@ -464,6 +464,12 @@ class Generator(QObject):
             except OSError as exc:  # pasta de destino sem permissão, disco cheio
                 summary.error = f"Não foi possível gravar em {folder}: {exc}"
                 break
+            except Exception as exc:  # inesperado (ex.: falta de memória na GPU): vira mensagem, não some com a thread
+                import traceback
+
+                traceback.print_exc()
+                summary.error = f"erro inesperado: {exc.__class__.__name__}: {exc}"
+                break
             summary.pages += result.pages
             summary.drawn += result.drawn
             summary.translated += result.translated

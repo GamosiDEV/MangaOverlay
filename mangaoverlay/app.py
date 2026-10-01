@@ -33,7 +33,7 @@ from .hotkeys import HotkeyManager
 from .languages import AUTO, SOURCES, TARGETS, source_name, target_name
 from .pipeline import Pipeline
 from .platform_info import is_wayland
-from .render import base_font
+from .render import base_font, register_fonts
 from .ui.batchdialog import BatchDialog, BatchWindow
 from .ui.characters import CharactersDialog
 from .ui.flowwizard import FlowWindow, FlowWizard
@@ -116,6 +116,9 @@ class MangaOverlayApp(QObject):
         if self.db.work(self.config.current_work) is None:
             self.config.current_work = None  # obra apagada ou banco novo
         self.pipeline = Pipeline(self.db)
+        # A fonte incluída é registrada aqui, na thread principal: a geração de capítulos desenha em segundo plano, e
+        # registrar fontes fora da thread principal não é seguro no Qt
+        register_fonts()
         # Uma tarefa por vez, sempre na mesma thread: os modelos na GPU não são usados em paralelo
         self._worker = _Worker()
         self._jobs: dict[int, tuple] = {}  # tarefa -> (on_done, on_failed)
@@ -169,9 +172,14 @@ class MangaOverlayApp(QObject):
         )
         self._flow_window = FlowWindow(self.db, self.flows)
         self._flow_window.setWindowIcon(app_icon())
-        self.importer.finished.connect(lambda _summary: self.flows.tick())
-        self.batch_runner.finished.connect(lambda _outcome: self.flows.tick())
-        self.generator.finished.connect(self.flows.generation_finished)
+        # Enfileirado: esses sinais saem das threads de trabalho, e o fluxo mexe em janelas e inicia outros trabalhos.
+        # (Ligar a uma função solta, sem objeto Qt de destino, rodaria o fluxo na thread de quem emitiu e derrubava o app.)
+        queued = Qt.ConnectionType.QueuedConnection
+        self.importer.finished.connect(self.flows.on_import_finished, queued)
+        self.batch_runner.finished.connect(self.flows.on_batch_finished, queued)
+        self.batch_runner.log.connect(self.flows.on_batch_log, queued)
+        self.generator.finished.connect(self.flows.generation_finished, queued)
+        self.flows.attention.connect(self._flow_window.show_flow, queued)
         self._flow_timer = QTimer(self)
         self._flow_timer.setInterval(5000)
         self._flow_timer.timeout.connect(self.flows.tick)
@@ -179,7 +187,8 @@ class MangaOverlayApp(QObject):
 
         self._build_tray()
         # No tempo real, os avisos de andamento só iriam poluir a tela (e a notificação mudaria a tela no meio da tradução)
-        self.status.connect(lambda message: None if self._auto else self._notify(message, 5000))
+        # Enfileirado: o status sai da thread de trabalho e a notificação da bandeja é da thread principal
+        self.status.connect(self._on_status, Qt.ConnectionType.QueuedConnection)
 
         self.hotkeys = HotkeyManager(self)
         self.hotkeys.triggered.connect(self._on_hotkey)
@@ -775,6 +784,10 @@ class MangaOverlayApp(QObject):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             # Clique no ícone: traduz; durante uma tradução, cancela
             self.cancel_translation() if self._busy else self.translate_screen()
+
+    def _on_status(self, message: str) -> None:
+        if not self._auto:
+            self._notify(message, 5000)
 
     def _notify(self, message: str, timeout: int = 8000, warning: bool = False, on_click=None) -> None:
         self._on_message_clicked = on_click  # só a notificação atual responde ao clique

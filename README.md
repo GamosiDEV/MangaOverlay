@@ -239,7 +239,7 @@ O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: O
 3. **Tradução:** motor, modelo e todas as opções da tradução em lote (páginas por pedido, envio normal ou Batch API, capítulos de memória, partes, nomes automáticos). Com motores de IA, um **limite de custo**: os capítulos novos só têm custo conhecido depois da leitura; se a estimativa passar do limite, o fluxo pausa e pergunta, e abaixo dele segue sozinho.
 4. **Resultado:** gerar ou não os capítulos traduzidos no fim (CBZ ou pasta, onde salvar, reconstruir o desenho).
 
-"Andamento do fluxo…" mostra as etapas e o que está acontecendo, com os botões para continuar (quando pausado) ou cancelar. O estado fica salvo: se o app fechar no meio (por exemplo, esperando a Batch API, que leva até 24 h), o fluxo continua ao abrir de novo. Se a tradução pausar por um erro, o fluxo espera: retome a tradução em lote pelo menu e ele segue sozinho quando ela terminar.
+"Andamento do fluxo…" mostra as etapas e o passo a passo (o mesmo detalhe da tradução em lote: leitura, custo, cada bloco enviado, geração, pausas e erros), com os botões para continuar (quando pausado), cancelar, copiar o log e abrir a pasta do resultado. Quando o fluxo termina ou pausa, a janela abre sozinha, além do aviso na bandeja. O estado fica salvo: se o app fechar no meio (por exemplo, esperando a Batch API, que leva até 24 h), o fluxo continua ao abrir de novo. Se a tradução pausar por um erro, o fluxo espera: retome a tradução em lote pelo menu e ele segue sozinho quando ela terminar.
 
 O idioma de uma obra nova é o escolhido no assistente (o fluxo não confere o idioma das páginas, como faz "Importar capítulos…").
 
@@ -370,9 +370,10 @@ Com o app aberto, `--translate`, `--colorize` e `--hide` só avisam a instância
 | Configurações | `~/.config/MangaOverlay/config.json` | `%LOCALAPPDATA%\MangaOverlay\config.json` |
 | Obras e traduções (SQLite) | `~/.local/share/MangaOverlay/mangaoverlay.db` | `%LOCALAPPDATA%\MangaOverlay\mangaoverlay.db` |
 | Modelos | `~/.cache/huggingface` e `~/.cache/MangaOverlay/easyocr` | `%USERPROFILE%\.cache\huggingface` e `%LOCALAPPDATA%\MangaOverlay\Cache\easyocr` |
-| Log do app (sem console) | — | `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log` |
+| Log do app (aberto pelo menu ou atalho; inclui a pilha de qualquer crash) | `~/.local/state/MangaOverlay/log/mangaoverlay.log` | `%LOCALAPPDATA%\MangaOverlay\Logs\mangaoverlay.log` |
 | Permissão do tempo real (GNOME) | `~/.config/MangaOverlay/screencast-token` | — |
 | Log da tradução em lote | `~/.local/state/MangaOverlay/log/traducao-em-lote.log` | `%LOCALAPPDATA%\MangaOverlay\Logs\traducao-em-lote.log` |
+| Log do fluxo completo | `~/.local/state/MangaOverlay/log/fluxo-completo.log` | `%LOCALAPPDATA%\MangaOverlay\Logs\fluxo-completo.log` |
 
 ## Como funciona
 
