@@ -162,6 +162,12 @@ _MIGRATIONS = [
     """
     ALTER TABLE regioes ADD COLUMN forma TEXT;
     """,
+    # 8: lote em partes. Na Batch API, o envio pode ser dividido em partes (por capítulos) mandadas uma depois da
+    # outra, com a memória atualizada entre elas; `levantar_nomes`: levanta os nomes antes de cada grupo e salva direto
+    """
+    ALTER TABLE requisicoes ADD COLUMN parte INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE lotes ADD COLUMN levantar_nomes INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -268,8 +274,9 @@ class Batch:
     mode: str = "normal"  # "normal" ou "batch" (Batch API da OpenAI)
     remote_id: str | None = None
     remote_state: str | None = None
-    round: int = 0  # envios à Batch API já feitos (o 2º e o 3º levam só o que faltou)
+    round: int = 0  # envios à Batch API já feitos da parte atual (o 2º e o 3º levam só o que faltou)
     pause_requested: bool = False
+    survey_names: bool = False  # levanta os nomes antes de cada grupo e salva direto na lista
 
 
 @dataclass(frozen=True)
@@ -278,7 +285,18 @@ class BatchRequest:
     order: int
     state: str
     attempts: int
-    sync: bool = False  # modo híbrido: traduzida na hora, antes do envio à Batch API
+    sync: bool = False  # capítulos de memória: traduzida na hora, antes do envio à Batch API
+    part: int = 0  # parte do envio à Batch API (1, 2…); 0 nos blocos síncronos e no envio normal
+
+
+@dataclass(frozen=True)
+class PageGroup:
+    """Páginas de um lote que vão juntas: em blocos de `block` páginas, na hora (`sync`) ou na parte `part` da Batch API."""
+
+    pages: list[int]
+    block: int
+    sync: bool = False
+    part: int = 0
 
 
 @dataclass(frozen=True)
@@ -807,31 +825,39 @@ class Database:
         estimated_cost: float | None,
         mode: str = "normal",
         sync_pages: int = 0,
+        groups: "list[PageGroup] | None" = None,
+        survey_names: bool = False,
     ) -> int:
         """Cria o lote e uma requisição pendente para cada bloco de páginas.
 
-        `sync_pages` (modo híbrido da Batch API): as primeiras páginas formam blocos próprios, traduzidos na hora
-        para montar a memória antes de enviar o resto à OpenAI.
+        `groups`: grupos de páginas com o próprio tamanho de bloco (capítulos de memória e partes da Batch API; ver
+        batch.plan_groups). Sem eles, `sync_pages` (modo híbrido antigo): as primeiras páginas formam blocos
+        síncronos, traduzidos na hora para montar a memória antes de enviar o resto à OpenAI.
         """
+        if groups is None:
+            groups = [PageGroup(page_ids[:sync_pages], pages_per_block, sync=True)] if sync_pages else []
+            groups.append(PageGroup(page_ids[sync_pages:], pages_per_block))
         with self._lock:
             self._conn.execute("BEGIN")
             cursor = self._conn.execute(
-                """INSERT INTO lotes (obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, custo_estimado, modo)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (work_id, key.engine, key.model, key.source, key.target, pages_per_block, estimated_cost, mode),
+                """INSERT INTO lotes (obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, custo_estimado, modo,
+                                      levantar_nomes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (work_id, key.engine, key.model, key.source, key.target, pages_per_block, estimated_cost, mode, int(survey_names)),
             )
             batch_id = cursor.lastrowid
-            groups = [(page_ids[:sync_pages], 1), (page_ids[sync_pages:], 0)] if sync_pages else [(page_ids, 0)]
             order = 0
-            for pages, sync in groups:
-                for start in range(0, len(pages), pages_per_block):
+            for group in groups:
+                pages, block = group.pages, max(1, group.block)
+                for start in range(0, len(pages), block):
                     order += 1
                     request_id = self._conn.execute(
-                        "INSERT INTO requisicoes (lote_id, ordem, sincrona) VALUES (?, ?, ?)", (batch_id, order, sync)
+                        "INSERT INTO requisicoes (lote_id, ordem, sincrona, parte) VALUES (?, ?, ?, ?)",
+                        (batch_id, order, int(group.sync), group.part),
                     ).lastrowid
                     self._conn.executemany(
                         "INSERT INTO requisicao_paginas (requisicao_id, pagina_id) VALUES (?, ?)",
-                        [(request_id, page_id) for page_id in pages[start : start + pages_per_block]],
+                        [(request_id, page_id) for page_id in pages[start : start + block]],
                     )
             self._conn.execute("COMMIT")
         return batch_id
@@ -841,11 +867,11 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT id, obra_id, motor, modelo, idioma_origem, idioma_destino, paginas_por_bloco, estado, erro,
-                           custo_estimado, modo, lote_remoto, estado_remoto, rodada, pausar
+                           custo_estimado, modo, lote_remoto, estado_remoto, rodada, pausar, levantar_nomes
                     FROM lotes WHERE estado IN ({marks}) ORDER BY id""",
                 states,
             ).fetchall()
-        return [Batch(*row[:14], bool(row[14])) for row in rows]
+        return [Batch(*row[:14], bool(row[14]), bool(row[15])) for row in rows]
 
     def set_remote(self, batch_id: int, remote_id: str | None, remote_state: str | None, round: int | None = None) -> None:
         with self._lock:
@@ -871,10 +897,24 @@ class Database:
         marks = ",".join("?" * len(states))
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT id, ordem, estado, tentativas, sincrona FROM requisicoes WHERE lote_id = ? AND estado IN ({marks}) ORDER BY ordem",
+                f"""SELECT id, ordem, estado, tentativas, sincrona, parte FROM requisicoes
+                    WHERE lote_id = ? AND estado IN ({marks}) ORDER BY ordem""",
                 (batch_id, *states),
             ).fetchall()
-        return [BatchRequest(*row[:4], bool(row[4])) for row in rows]
+        return [BatchRequest(*row[:4], bool(row[4]), row[5]) for row in rows]
+
+    def request_chapters(self, request_ids: list[int]) -> list[int]:
+        """Capítulos das páginas dessas requisições, na ordem de leitura (para levantar os nomes antes de enviar)."""
+        if not request_ids:
+            return []
+        marks = ",".join("?" * len(request_ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT DISTINCT c.id, c.ordem, c.nome FROM requisicao_paginas rp JOIN paginas p ON p.id = rp.pagina_id
+                    JOIN capitulos c ON c.id = p.capitulo_id WHERE rp.requisicao_id IN ({marks}) ORDER BY c.ordem, c.nome""",
+                request_ids,
+            ).fetchall()
+        return [row[0] for row in rows]
 
     def request_lines(self, request_id: int) -> list[SourceLine]:
         with self._lock:

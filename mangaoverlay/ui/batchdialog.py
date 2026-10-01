@@ -24,16 +24,210 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_DISPLAY_NAME, pricing
-from ..batch import LLM_ENGINES, LOG_FILE, TEXT_ENGINE, BatchLogEntry, BatchOutcome, BatchProgress, batch_key, estimate
+from ..batch import (
+    LLM_ENGINES,
+    LOG_FILE,
+    TEXT_ENGINE,
+    BatchLogEntry,
+    BatchOptions,
+    BatchOutcome,
+    BatchProgress,
+    batch_key,
+    estimate_plan,
+    split_parts,
+)
 from ..config import ENGINES, Config
 from ..db import Database, Work, normalize
+
+
+class TranslationOptions(QWidget):
+    """Como os capítulos vão ser traduzidos: páginas por pedido, modo de envio, capítulos de memória, partes da Batch
+    API e nomes, com o custo estimado ao vivo. Usado na janela do lote e no fluxo completo.
+
+    `chapters()` devolve os capítulos escolhidos (só os já lidos entram na estimativa; `unread_note` explica o resto).
+    """
+
+    changed = Signal()
+
+    def __init__(self, db: Database, work: Work, config: Config, chapters, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._db = db
+        self._work = work
+        self._config = config
+        self._chapters = chapters
+        self._key = batch_key(config, work.id, work.source_lang)
+        llm = self._key.engine in LLM_ENGINES
+
+        self.block = QSpinBox()
+        self.block.setRange(1, 100)
+        self.block.setValue(config.batch_pages_per_block)
+        self.block.setSuffix(" páginas por pedido")
+        self.block_hint = QLabel("")
+        block_row = QHBoxLayout()
+        block_row.addWidget(self.block)
+        block_row.addWidget(self.block_hint, 1)
+
+        # Modo de envio: normal (na hora) ou Batch API da OpenAI (metade do preço, em até 24 h)
+        self.mode_normal = QRadioButton("Envio normal: traduz agora, bloco a bloco (a memória se atualiza a cada capítulo)")
+        self.mode_batch = QRadioButton("Batch API da OpenAI: 50% mais barato; a OpenAI processa em segundo plano (em geral minutos, até 24 h)")
+        self.mode_batch.setEnabled(self._key.engine == "openai-text")
+        if not self.mode_batch.isEnabled():
+            self.mode_batch.setToolTip("Disponível só com os motores da OpenAI.")
+        (self.mode_batch if self.mode_batch.isEnabled() and config.batch_mode == "batch" else self.mode_normal).setChecked(True)
+
+        # Batch API: capítulos de memória (na hora) e o resto em partes, com a memória atualizada entre elas
+        self.memory_chapters = QSpinBox()
+        self.memory_chapters.setRange(0, 999)
+        self.memory_chapters.setValue(config.batch_memory_chapters if db.memory(work.id).empty else 0)
+        self.memory_chapters.setSuffix(" capítulo(s)")
+        self.memory_own_block = QCheckBox("em pedidos de")
+        self.memory_own_block.setToolTip("Sem marcar, os capítulos de memória usam o mesmo tamanho de pedido do lote.")
+        self.memory_block = QSpinBox()
+        self.memory_block.setRange(1, 100)
+        self.memory_block.setSuffix(" páginas")
+        self.memory_own_block.setChecked(config.batch_memory_block > 0)
+        self.memory_block.setValue(config.batch_memory_block or config.batch_pages_per_block)
+        memory_row = QHBoxLayout()
+        memory_row.addSpacing(24)
+        memory_row.addWidget(QLabel("Antes do envio, traduzir na hora os primeiros"))
+        memory_row.addWidget(self.memory_chapters)
+        memory_row.addWidget(self.memory_own_block)
+        memory_row.addWidget(self.memory_block)
+        memory_row.addStretch(1)
+        self.parts = QSpinBox()
+        self.parts.setRange(1, 999)
+        self.parts.setValue(config.batch_parts)
+        self.parts.setSuffix(" parte(s)")
+        parts_row = QHBoxLayout()
+        parts_row.addSpacing(24)
+        parts_row.addWidget(QLabel("Enviar o resto em"))
+        parts_row.addWidget(self.parts)
+        parts_row.addWidget(QLabel("(a memória é atualizada depois de cada parte)"), 1)
+        self._batch_rows = QWidget()
+        batch_rows = QVBoxLayout(self._batch_rows)
+        batch_rows.setContentsMargins(0, 0, 0, 0)
+        batch_rows.addLayout(memory_row)
+        batch_rows.addLayout(parts_row)
+
+        self.survey_names = QCheckBox("Levantar os nomes dos personagens antes de traduzir cada grupo (salvos direto na lista)")
+        self.survey_names.setToolTip(
+            "Usa o modelo barato do levantamento completo, só nos capítulos ainda não analisados. "
+            "A lista pode ser revisada depois em “Personagens da obra”."
+        )
+        self.survey_names.setChecked(config.batch_survey_names and llm)
+        self.survey_names.setEnabled(llm)
+
+        self.summary = QLabel("")
+        self.summary.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(block_row)
+        layout.addWidget(self.mode_normal)
+        layout.addWidget(self.mode_batch)
+        layout.addWidget(self._batch_rows)
+        layout.addWidget(self.survey_names)
+        layout.addWidget(self.summary)
+
+        for spin in (self.block, self.memory_chapters, self.memory_block, self.parts):
+            spin.valueChanged.connect(self.refresh)
+        for check in (self.mode_normal, self.memory_own_block, self.survey_names):
+            check.toggled.connect(self.refresh)
+        self.estimate = None
+        self.cost = None
+        self.ok = False
+
+    @property
+    def mode(self) -> str:
+        return "batch" if self.mode_batch.isChecked() else "normal"
+
+    @property
+    def key(self):
+        return self._key
+
+    def options(self, chapter_ids: list[int] | None = None) -> BatchOptions:
+        batch = self.mode == "batch"
+        return BatchOptions(
+            chapter_ids=list(self._chapters() if chapter_ids is None else chapter_ids),
+            pages_per_block=self.block.value(),
+            mode=self.mode,
+            memory_chapters=self.memory_chapters.value() if batch else 0,
+            memory_block=self.memory_block.value() if batch and self.memory_own_block.isChecked() else 0,
+            parts=self.parts.value() if batch else 1,
+            survey_names=self.survey_names.isChecked() and self.survey_names.isEnabled(),
+        )
+
+    def remember(self) -> dict:
+        """As escolhas como configuração (padrão da próxima vez)."""
+        return {
+            "batch_pages_per_block": self.block.value(),
+            "batch_mode": self.mode,
+            "batch_memory_chapters": self.memory_chapters.value(),
+            "batch_memory_block": self.memory_block.value() if self.memory_own_block.isChecked() else 0,
+            "batch_parts": self.parts.value(),
+            "batch_survey_names": self.survey_names.isChecked(),
+        }
+
+    def refresh(self) -> None:
+        batch = self.mode == "batch"
+        self._batch_rows.setVisible(batch)
+        self.memory_block.setEnabled(self.memory_own_block.isChecked())
+        chapters = self._chapters()
+        if not chapters:
+            self.estimate, self.cost, self.ok = None, None, False
+            self.summary.setText("Marque ao menos um capítulo.")
+            self.block_hint.setText("")
+            self.changed.emit()
+            return
+        options = self.options(chapters)
+        e, cost = estimate_plan(self._db, self._config, self._work.id, self._work.source_lang, options)
+        self.estimate, self.cost = e, cost
+        llm = self._key.engine in LLM_ENGINES
+        too_big = llm and self.block.value() > e.max_pages_per_block
+        self.block_hint.setText(
+            f"<span style='color:#c0392b'>acima do máximo seguro para {self._key.model}: {e.max_pages_per_block}</span>"
+            if too_big
+            else (f"máximo seguro para {self._key.model}: {e.max_pages_per_block}" if llm else "")
+        )
+        memory, rest = options.memory_and_rest()
+        if batch:
+            self.parts.setMaximum(max(1, len(rest)))
+            self.memory_chapters.setMaximum(max(0, len(chapters)))
+        repeated = e.lines - e.new_lines
+        if e.new_lines == 0:
+            text = "Tudo o que foi marcado já está traduzido."
+        else:
+            text = (
+                f"<b>{e.new_lines} falas a traduzir</b>, de {e.pages} páginas"
+                + (f" ({repeated} já traduzidas ou repetidas não são enviadas)" if repeated else "")
+                + "."
+            )
+            if llm:
+                parts = []
+                if memory:
+                    parts.append(f"{len(memory)} capítulo(s) de memória: {pricing.format_cost(cost.memory)}")
+                label = "Batch API" + (f" em {len(split_parts([1] * len(rest), options.parts))} partes" if options.parts > 1 else "")
+                parts.append(f"{label}: {pricing.format_cost(cost.main)}" if batch else f"tradução: {pricing.format_cost(cost.main)}")
+                if options.survey_names:
+                    parts.append(f"nomes: {pricing.format_cost(cost.names)}")
+                if cost.summaries:
+                    parts.append(f"resumos: {pricing.format_cost(cost.summaries)}")
+                text += f"<br><b>Custo estimado: {pricing.format_cost(cost.total)}</b> ({'; '.join(parts)})"
+                text += f"<br>~{pricing.thousands(e.input_tokens)} tokens de entrada, ~{pricing.thousands(e.output_tokens)} de saída."
+                if cost.names_error:
+                    text += f"<br><span style='color:#d35400'>Nomes: {html.escape(cost.names_error)}</span>"
+            else:
+                text += "<br><b>Custo: grátis.</b>"
+        self.summary.setText(text)
+        self.ok = e.new_lines > 0 and not too_big
+        self.changed.emit()
 
 
 class BatchDialog(QDialog):
     def __init__(self, db: Database, work: Work, config: Config, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"Traduzir capítulos — {work.name} — {APP_DISPLAY_NAME}")
-        self.resize(620, 560)
+        self.resize(680, 640)
         self._db = db
         self._work = work
         self._config = config
@@ -63,7 +257,6 @@ class BatchDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked if (not texts or done >= unique) else Qt.CheckState.Checked)
             self.chapters.addItem(item)
-        self.chapters.itemChanged.connect(self._update_estimate)
 
         select_all = QPushButton("Marcar todos")
         select_all.clicked.connect(lambda: self._check_all(True))
@@ -74,38 +267,7 @@ class BatchDialog(QDialog):
         selection.addWidget(select_none)
         selection.addStretch(1)
 
-        self.block = QSpinBox()
-        self.block.setRange(1, 100)
-        self.block.setValue(config.batch_pages_per_block)
-        self.block.setSuffix(" páginas por pedido")
-        self.block.valueChanged.connect(self._update_estimate)
-        self.block_hint = QLabel("")
-        block_row = QHBoxLayout()
-        block_row.addWidget(self.block)
-        block_row.addWidget(self.block_hint, 1)
-
-        # Modo de envio: normal (na hora) ou Batch API da OpenAI (metade do preço, em até 24 h)
-        self.mode_normal = QRadioButton("Envio normal: traduz agora, bloco a bloco")
-        self.mode_batch = QRadioButton("Batch API da OpenAI: 50% mais barato; a OpenAI processa em segundo plano (em geral minutos, até 24 h)")
-        self.mode_batch.setEnabled(self._key.engine == "openai-text")
-        if not self.mode_batch.isEnabled():
-            self.mode_batch.setToolTip("Disponível só com os motores da OpenAI.")
-        (self.mode_batch if self.mode_batch.isEnabled() and config.batch_mode == "batch" else self.mode_normal).setChecked(True)
-        self.mode_normal.toggled.connect(self._update_estimate)
-        # Modo híbrido: o 1º capítulo na hora monta a memória antes do resto ir à OpenAI
-        self.hybrid = QCheckBox("Traduzir o 1º capítulo marcado na hora, para montar a memória da obra antes de enviar o resto")
-        self.hybrid.setChecked(db.memory(work.id).empty)
-        self.hybrid.toggled.connect(self._update_estimate)
-        mode_box = QVBoxLayout()
-        mode_box.addWidget(self.mode_normal)
-        mode_box.addWidget(self.mode_batch)
-        hybrid_row = QHBoxLayout()
-        hybrid_row.addSpacing(24)
-        hybrid_row.addWidget(self.hybrid, 1)
-        mode_box.addLayout(hybrid_row)
-
-        self.summary = QLabel("")
-        self.summary.setWordWrap(True)
+        self.options = TranslationOptions(db, work, config, self.selected_chapters)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.start = self.buttons.addButton("Traduzir", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -117,28 +279,16 @@ class BatchDialog(QDialog):
         layout.addWidget(QLabel("Capítulos importados (as falas já traduzidas não são enviadas de novo):"))
         layout.addWidget(self.chapters, 1)
         layout.addLayout(selection)
-        layout.addLayout(block_row)
-        layout.addLayout(mode_box)
-        layout.addWidget(self.summary)
+        layout.addWidget(self.options)
         layout.addWidget(self.buttons)
-        self.estimate = None
-        self._update_estimate()
+        self.options.changed.connect(lambda: self.start.setEnabled(self.options.ok))
+        self.chapters.itemChanged.connect(lambda _item: self.options.refresh())
+        self.options.refresh()
 
     def _check_all(self, checked: bool) -> None:
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
         for i in range(self.chapters.count()):
             self.chapters.item(i).setCheckState(state)
-
-    @property
-    def mode(self) -> str:
-        return "batch" if self.mode_batch.isChecked() else "normal"
-
-    def sync_pages(self) -> int:
-        """Páginas do 1º capítulo marcado, traduzidas na hora no modo híbrido (0 se não se aplica)."""
-        chapters = self.selected_chapters()
-        if self.mode != "batch" or not self.hybrid.isChecked() or len(chapters) < 2:
-            return 0
-        return len(self._db.chapter_pages(chapters[:1]))
 
     def selected_chapters(self) -> list[int]:
         return [
@@ -146,44 +296,6 @@ class BatchDialog(QDialog):
             for i in range(self.chapters.count())
             if self.chapters.item(i).checkState() == Qt.CheckState.Checked
         ]
-
-    def _update_estimate(self) -> None:
-        chapters = self.selected_chapters()
-        if not chapters:
-            self.estimate = None
-            self.summary.setText("Marque ao menos um capítulo.")
-            self.block_hint.setText("")
-            self.start.setEnabled(False)
-            return
-        e = estimate(self._db, self._config, self._work.id, self._work.source_lang, chapters, self.block.value())
-        self.estimate = e
-        llm = self._key.engine in LLM_ENGINES
-        too_big = llm and self.block.value() > e.max_pages_per_block
-        self.block_hint.setText(
-            f"<span style='color:#c0392b'>acima do máximo seguro para {self._key.model}: {e.max_pages_per_block}</span>"
-            if too_big
-            else (f"máximo seguro para {self._key.model}: {e.max_pages_per_block}" if llm else "")
-        )
-        repeated = e.lines - e.new_lines
-        if e.new_lines == 0:
-            text = "Tudo o que foi marcado já está traduzido."
-        else:
-            batch = self.mode == "batch"
-            cost = pricing.format_cost(e.cost * (0.5 if batch else 1.0) if e.cost is not None else None) if llm else "grátis"
-            if batch and e.cost is not None:
-                cost += f" (no envio normal: {pricing.format_cost(e.cost)})"
-            if llm and e.summary_cost:
-                cost += f" + resumos da memória: {pricing.format_cost(e.summary_cost)}"
-            text = (
-                f"<b>{e.new_lines} falas a traduzir</b> em {e.requests} pedido(s), de {e.pages} páginas"
-                + (f" ({repeated} já traduzidas ou repetidas não são enviadas)" if repeated else "")
-                + f".<br><b>Custo estimado: {cost}</b>"
-            )
-            if llm:
-                text += f" (~{pricing.thousands(e.input_tokens)} tokens de entrada, ~{pricing.thousands(e.output_tokens)} de saída)"
-        self.summary.setText(text)
-        self.hybrid.setVisible(self.mode == "batch")
-        self.start.setEnabled(e.new_lines > 0 and not too_big)
 
 
 class BatchWindow(QWidget):

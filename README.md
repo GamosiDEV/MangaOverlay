@@ -292,7 +292,11 @@ Além da lista de personagens, cada obra tem uma memória que vai junto em toda 
 
 A memória só muda em pontos fixos (fim de capítulo no lote, ou a cada 15 termos novos na leitura pela tela). Assim o começo dos pedidos fica idêntico durante o capítulo e o cache de prompt funciona: nos testes com a OpenAI, ~90% da entrada veio do cache (que custa 25% do preço no `gpt-4.1-mini`). "Memória da obra…" no menu mostra o resumo e o glossário e permite apagá-los.
 
-Na Batch API, o **modo híbrido** traduz o 1º capítulo na hora para montar a memória e envia o resto à OpenAI já com ela.
+Na Batch API, dá para montar a memória antes e ir atualizando durante o envio:
+
+- **Capítulos de memória:** os X primeiros capítulos marcados são traduzidos na hora (em pedidos do mesmo tamanho do lote, ou de um tamanho próprio, se você marcar) para montar o glossário e o resumo antes de o resto ir à OpenAI. Esses capítulos custam o preço normal.
+- **Envio em partes:** o resto vai em Z envios seguidos, divididos sem cortar capítulo. Depois de cada parte, os capítulos que ficaram completos são resumidos e o glossário é atualizado, e a parte seguinte já vai com a memória nova. Mais partes deixam a memória mais atualizada, mas o lote leva mais tempo (cada parte espera a OpenAI).
+- **Nomes automáticos** (também no envio normal): antes de cada grupo de capítulos, os que ainda não foram analisados passam pelo levantamento de nomes (modelo barato), e os personagens novos são salvos direto na lista. Dá para revisar depois em "Personagens da obra".
 
 ## Motores de tradução
 
