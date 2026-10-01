@@ -230,6 +230,19 @@ Se o app fechar no meio, nada se perde: ao abrir de novo, a importação continu
 
 O lote sempre usa o modo texto (o texto já foi lido pelo OCR local). Motores: OpenAI, Claude, NLLB offline (grátis) e Google gratuito. Na leitura, qualquer tradução já paga com IA da obra é usada, mesmo que você esteja lendo com outro motor ou modelo.
 
+### Fluxo completo
+
+"Fluxo completo (obra → capítulos → tradução → resultado)…" no menu da bandeja faz tudo de uma vez. Um assistente junta as escolhas e depois as etapas rodam sozinhas, uma atrás da outra:
+
+1. **Obra:** uma que você já tem, ou uma nova (nome e idioma original).
+2. **Capítulos:** marque capítulos já importados e/ou adicione novos (pasta de imagens, CBZ, ZIP ou PDF).
+3. **Tradução:** motor, modelo e todas as opções da tradução em lote (páginas por pedido, envio normal ou Batch API, capítulos de memória, partes, nomes automáticos). Com motores de IA, um **limite de custo**: os capítulos novos só têm custo conhecido depois da leitura; se a estimativa passar do limite, o fluxo pausa e pergunta, e abaixo dele segue sozinho.
+4. **Resultado:** gerar ou não os capítulos traduzidos no fim (CBZ ou pasta, onde salvar, reconstruir o desenho).
+
+"Andamento do fluxo…" mostra as etapas e o que está acontecendo, com os botões para continuar (quando pausado) ou cancelar. O estado fica salvo: se o app fechar no meio (por exemplo, esperando a Batch API, que leva até 24 h), o fluxo continua ao abrir de novo. Se a tradução pausar por um erro, o fluxo espera: retome a tradução em lote pelo menu e ele segue sozinho quando ela terminar.
+
+O idioma de uma obra nova é o escolhido no assistente (o fluxo não confere o idioma das páginas, como faz "Importar capítulos…").
+
 ### Gerar capítulos traduzidos (CBZ ou imagens)
 
 "Gerar capítulos traduzidos…" no menu da bandeja (ou o botão "Gerar capítulo(s) traduzido(s)…" em "Obras e capítulos…") grava os capítulos importados com as traduções desenhadas nos balões. Dá para ler em qualquer leitor, inclusive no celular: copie o arquivo para o aparelho e abra no Mihon/Tachiyomi, Perfect Viewer ou outro leitor de quadrinhos.
